@@ -1,37 +1,75 @@
+/*
+ * capture metrics and session statistics aggregation.
+ *
+ * tracks cumulative packet counts, byte volumes, directional distribution (TX/RX/loopback),
+ * and protocol occurrences across all network layers. generates a comprehensive summary
+ * report upon capture termination (e.g. Ctrl+C or count limit).
+ */
+
 use crate::direction::PacketDirection;
 use crate::protocols::{AppProtocol, ParsedPacket};
 use colored::Colorize;
 use std::time::Instant;
 
-/// Aggregates capture metrics, protocol distributions, and directional volumes.
+/*
+ * aggregates capture metrics, protocol distributions, and directional volumes.
+ * tracks session start time for throughput calculations (pps and bps).
+ */
 #[derive(Debug)]
 pub struct TrafficStats {
+    /* timestamp when traffic capture commenced. */
     pub start_time: Instant,
+    /* total number of packets processed across all interfaces. */
     pub total_packets: usize,
+    /* total raw byte volume processed. */
     pub total_bytes: u64,
+    /* count of transmitted (outgoing) packets. */
     pub sent_packets: usize,
+    /* volume in bytes of transmitted (outgoing) packets. */
     pub sent_bytes: u64,
+    /* count of received (incoming) packets. */
     pub recv_packets: usize,
+    /* volume in bytes of received (incoming) packets. */
     pub recv_bytes: u64,
+    /* count of local loopback packets. */
     pub loopback_packets: usize,
+    /* volume in bytes of local loopback packets. */
     pub loopback_bytes: u64,
+    /* count of promiscuous or indeterminate direction packets. */
     pub other_packets: usize,
-    // Protocol counters
+
+    /* layer 3: IPv4 packet counter. */
     pub count_ipv4: usize,
+    /* layer 3: IPv6 packet counter. */
     pub count_ipv6: usize,
+    /* layer 2/3: ARP packet counter. */
     pub count_arp: usize,
+
+    /* layer 4: TCP segment counter. */
     pub count_tcp: usize,
+    /* layer 4: UDP datagram counter. */
     pub count_udp: usize,
+    /* layer 4: ICMP/ICMPv6 control message counter. */
     pub count_icmp: usize,
+
+    /* layer 7: DNS message counter. */
     pub count_dns: usize,
+    /* layer 7: HTTP message counter. */
     pub count_http: usize,
+    /* layer 7: TLS record counter. */
     pub count_tls: usize,
+    /* layer 7: DHCP message counter. */
     pub count_dhcp: usize,
+    /* layer 7: NTP packet counter. */
     pub count_ntp: usize,
+    /* layer 7: SSH banner counter. */
     pub count_ssh: usize,
 }
 
 impl TrafficStats {
+    /*
+     * constructs a new zeroed `TrafficStats` instance with start_time recorded as now.
+     */
     pub fn new() -> Self {
         Self {
             start_time: Instant::now(),
@@ -59,13 +97,16 @@ impl TrafficStats {
         }
     }
 
-    /// Records metrics from a newly processed packet.
+    /*
+     * records metrics from a newly processed packet.
+     * updates directional counters, byte totals, and protocol breakdowns.
+     */
     pub fn record(&mut self, packet: &ParsedPacket) {
         let bytes = packet.raw_len as u64;
         self.total_packets += 1;
         self.total_bytes += bytes;
 
-        // Direction metrics
+        /* update traffic direction counters */
         match packet.direction {
             PacketDirection::Sent => {
                 self.sent_packets += 1;
@@ -84,7 +125,7 @@ impl TrafficStats {
             }
         }
 
-        // Layer 3 protocol distribution
+        /* update layer 3 network protocol distribution */
         if let Some(ip) = &packet.ip {
             match ip {
                 crate::protocols::ip::IpInfo::V4(_) => self.count_ipv4 += 1,
@@ -95,7 +136,7 @@ impl TrafficStats {
             self.count_arp += 1;
         }
 
-        // Layer 4 protocol distribution
+        /* update layer 4 transport protocol distribution */
         if packet.tcp.is_some() {
             self.count_tcp += 1;
         }
@@ -106,7 +147,7 @@ impl TrafficStats {
             self.count_icmp += 1;
         }
 
-        // Layer 5/7 Application protocol distribution
+        /* update layer 5/7 application protocol distribution */
         if let Some(app) = &packet.app {
             match app {
                 AppProtocol::Dns(_) => self.count_dns += 1,
@@ -119,7 +160,10 @@ impl TrafficStats {
         }
     }
 
-    /// Helper to format raw byte counts into human-readable strings (KB, MB, GB).
+    /*
+     * helper to format raw byte counts into human-readable strings (KB, MB, GB).
+     * scales using binary prefix multiples of 1024.
+     */
     fn format_bytes(bytes: u64) -> String {
         const KB: u64 = 1024;
         const MB: u64 = 1024 * KB;
@@ -136,8 +180,13 @@ impl TrafficStats {
         }
     }
 
-    /// Prints a comprehensive summary report of the capture session.
+    /*
+     * prints a comprehensive summary report of the capture session.
+     * calculates average throughput rates (packets/s and bytes/s),
+     * directional breakdowns, and a 3-column colorized protocol table.
+     */
     pub fn print_summary(&self) {
+        /* compute total elapsed time avoiding division by zero with minimum 0.001s */
         let duration = self.start_time.elapsed();
         let secs = duration.as_secs_f64().max(0.001);
         let pps = self.total_packets as f64 / secs;
@@ -148,6 +197,7 @@ impl TrafficStats {
         println!("{}", "                   CAPTURE TRAFFIC SUMMARY                        ".bold().white());
         println!("{}", "═══════════════════════════════════════════════════════════════════".cyan().bold());
 
+        /* overall throughput statistics */
         println!(
             " {:<24} {:<15} (Avg: {:.1} pkts/s)",
             "Total Packets:".bold(),
@@ -166,6 +216,7 @@ impl TrafficStats {
             secs
         );
 
+        /* directional breakdown statistics */
         println!();
         println!("{}", "--- Traffic Direction Breakdown ---".bold());
         println!(
@@ -196,6 +247,7 @@ impl TrafficStats {
             );
         }
 
+        /* protocol distribution breakdown */
         println!();
         println!("{}", "--- Protocol Distribution ---".bold());
         println!(

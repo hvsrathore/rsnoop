@@ -1,55 +1,71 @@
-//! Transmission Control Protocol (TCP) segment parser.
-//!
-//! Defined in RFC 793 / RFC 9293, TCP provides reliable, ordered, and error-checked
-//! delivery of a stream of octets between applications running on hosts.
+/*
+ * Transmission Control Protocol (TCP) segment parser.
+ *
+ * flow of control in TCP decoding:
+ * 1. entry point: called from `protocols::PacketParser::parse()` when IP protocol number is 6.
+ * 2. length check: validates 20-byte minimum TCP header length.
+ * 3. endpoint parsing: extracts 16-bit source port and destination port numbers.
+ * 4. connection tracking: extracts 32-bit sequence number, 32-bit acknowledgment number,
+ *    and 16-bit receive window size.
+ * 5. header size: calculates data offset via `(slice[12] >> 4) * 4` to account for TCP options.
+ * 6. control flags: performs bitwise extraction of 8 TCP control flags (SYN, ACK, FIN, RST, PSH, URG, ECE, CWR).
+ * 7. service lookup: maps ports to well-known application protocol names (e.g. 443 -> HTTPS, 22 -> SSH).
+ * 8. hand-off to L7: slices past the TCP header options to provide the application payload
+ *    for upper-layer demuxing (HTTP, TLS, SSH, DNS).
+ */
 
-/// Decoded Transmission Control Protocol (TCP) header fields.
+/*
+ * decoded Transmission Control Protocol (TCP) header fields.
+ * corresponds to RFC 793 and RFC 9293 specifications.
+ */
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TcpInfo {
-    /// 16-bit source port number.
+    /* 16-bit source port number. */
     pub src_port: u16,
-    /// 16-bit destination port number.
+    /* 16-bit destination port number. */
     pub dst_port: u16,
-    /// Well-known service name for source port (e.g. "HTTPS", "SSH") if recognized.
+    /* well-known service name for source port (e.g. "HTTPS", "SSH") if recognized. */
     pub src_port_name: Option<&'static str>,
-    /// Well-known service name for destination port if recognized.
+    /* well-known service name for destination port if recognized. */
     pub dst_port_name: Option<&'static str>,
-    /// 32-bit sequence number.
+    /* 32-bit sequence number. */
     pub seq_number: u32,
-    /// 32-bit acknowledgment number.
+    /* 32-bit acknowledgment number. */
     pub ack_number: u32,
-    /// Data offset in bytes (length of TCP header including options).
+    /* data offset in bytes (length of TCP header including options). */
     pub data_offset: u8,
-    /// SYN (Synchronize sequence numbers) flag.
+    /* SYN (Synchronize sequence numbers) flag. */
     pub syn: bool,
-    /// ACK (Acknowledgment field significant) flag.
+    /* ACK (Acknowledgment field significant) flag. */
     pub ack: bool,
-    /// FIN (No more data from sender) flag.
+    /* FIN (No more data from sender) flag. */
     pub fin: bool,
-    /// RST (Reset the connection) flag.
+    /* RST (Reset the connection) flag. */
     pub rst: bool,
-    /// PSH (Push function) flag.
+    /* PSH (Push function) flag. */
     pub psh: bool,
-    /// URG (Urgent pointer field significant) flag.
+    /* URG (Urgent pointer field significant) flag. */
     pub urg: bool,
-    /// ECE (ECN-Echo) flag.
+    /* ECE (ECN-Echo) flag. */
     pub ece: bool,
-    /// CWR (Congestion Window Reduced) flag.
+    /* CWR (Congestion Window Reduced) flag. */
     pub cwr: bool,
-    /// 16-bit receive window size.
+    /* 16-bit receive window size. */
     pub window_size: u16,
-    /// 16-bit TCP header & payload checksum.
+    /* 16-bit TCP header & payload checksum. */
     pub checksum: u16,
-    /// 16-bit urgent pointer offset.
+    /* 16-bit urgent pointer offset. */
     pub urgent_pointer: u16,
-    /// Formatted bracketed flags string (e.g. "[SYN, ACK]").
+    /* formatted bracketed flags string (e.g. "[SYN, ACK]"). */
     pub flags_str: String,
-    /// Length of the encapsulated application data payload in bytes.
+    /* length of the encapsulated application data payload in bytes. */
     pub payload_len: usize,
 }
 
-/// Maps common well-known and registered port numbers to protocol service names.
+/*
+ * maps common well-known and registered port numbers to protocol service names.
+ */
 pub fn port_to_service(port: u16) -> Option<&'static str> {
     match port {
         20 | 21 => Some("FTP"),
@@ -90,30 +106,35 @@ pub fn port_to_service(port: u16) -> Option<&'static str> {
     }
 }
 
-/// Parses a TCP header and returns the extracted information alongside remaining payload.
-///
-/// # Arguments
-/// * `slice` - Byte slice containing the TCP packet starting at the source port.
-///
-/// # Returns
-/// `Some((TcpInfo, application_payload_slice))` or `None` if slice is invalid or truncated.
+/*
+ * parses a TCP header and returns the extracted information alongside remaining payload.
+ *
+ * arguments:
+ * * `slice` - byte slice containing the TCP packet starting at the source port.
+ *
+ * returns:
+ * `Some((TcpInfo, application_payload_slice))` or `None` if slice is invalid or truncated.
+ */
 pub fn parse_tcp(slice: &[u8]) -> Option<(TcpInfo, &[u8])> {
+    /* verify minimum length for basic TCP header without options (20 bytes) */
     if slice.len() < 20 {
         return None;
     }
 
+    /* extract source and destination port numbers */
     let src_port = u16::from_be_bytes([slice[0], slice[1]]);
     let dst_port = u16::from_be_bytes([slice[2], slice[3]]);
     let seq_number = u32::from_be_bytes([slice[4], slice[5], slice[6], slice[7]]);
     let ack_number = u32::from_be_bytes([slice[8], slice[9], slice[10], slice[11]]);
 
+    /* calculate header length in bytes from 4-bit data offset field */
     let data_offset_byte = slice[12];
     let data_offset = (data_offset_byte >> 4) * 4;
     if (data_offset as usize) < 20 || slice.len() < (data_offset as usize) {
         return None;
     }
 
-    // Flags are in the lower 6 bits of byte 13 + 2 ECN bits
+    /* flags are located in lower 6 bits of byte 13 + 2 ECN bits */
     let flags_byte = slice[13];
     let cwr = (flags_byte & 0x80) != 0;
     let ece = (flags_byte & 0x40) != 0;
@@ -128,6 +149,7 @@ pub fn parse_tcp(slice: &[u8]) -> Option<(TcpInfo, &[u8])> {
     let checksum = u16::from_be_bytes([slice[16], slice[17]]);
     let urgent_pointer = u16::from_be_bytes([slice[18], slice[19]]);
 
+    /* build human-readable list of active TCP control flags */
     let mut flags_vec = Vec::new();
     if syn {
         flags_vec.push("SYN");
@@ -155,6 +177,7 @@ pub fn parse_tcp(slice: &[u8]) -> Option<(TcpInfo, &[u8])> {
     }
     let flags_str = format!("[{}]", flags_vec.join(", "));
 
+    /* slice off TCP header options to access application layer payload */
     let payload = &slice[(data_offset as usize)..];
 
     let info = TcpInfo {
@@ -180,5 +203,6 @@ pub fn parse_tcp(slice: &[u8]) -> Option<(TcpInfo, &[u8])> {
         payload_len: payload.len(),
     };
 
+    /* hand off TCP info and application payload slice */
     Some((info, payload))
 }

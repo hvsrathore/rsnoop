@@ -1,33 +1,41 @@
-//! Packet direction analysis engine.
-//!
-//! Accurately resolves whether each packet is:
-//! - **Sent (TX)**: Outgoing transmission originated from the local host.
-//! - **Received (RX)**: Incoming transmission addressed to or received by the local host.
-//! - **Loopback**: Internal host communication (e.g. 127.0.0.1 or ::1 on lo).
-//! - **Promiscuous**: Captured in transit between external network endpoints.
+/*
+ * packet direction analysis engine.
+ *
+ * accurately resolves whether each packet is:
+ * - sent (TX): outgoing transmission originated from the local host.
+ * - received (RX): incoming transmission addressed to or received by the local host.
+ * - loopback: internal host communication (e.g. 127.0.0.1 or ::1 on lo).
+ * - promiscuous: captured in transit between external network endpoints.
+ */
 
 use crate::args::DirectionFilter;
 use crate::interface::LocalIdentity;
 use colored::{ColoredString, Colorize};
 use std::net::IpAddr;
 
-/// Traffic flow direction classification.
+/*
+ * traffic flow direction classification.
+ * categorizes packet transmission path relative to the local capturing host.
+ */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketDirection {
-    /// Packet was transmitted (sent) by the local machine.
+    /* packet was transmitted (sent) by the local machine. */
     Sent,
-    /// Packet was received by the local machine.
+    /* packet was received by the local machine. */
     Received,
-    /// Packet was routed locally across the loopback interface.
+    /* packet was routed locally across the loopback interface. */
     Loopback,
-    /// Packet was captured promiscuously between other nodes.
+    /* packet was captured promiscuously between other nodes. */
     Promiscuous,
-    /// Direction could not be definitively determined.
+    /* direction could not be definitively determined. */
     Unknown,
 }
 
 impl PacketDirection {
-    /// Returns a colored terminal badge tag for compact output.
+    /*
+     * returns a colored terminal badge tag for compact output.
+     * uses distinct ANSI color codes to immediately highlight directionality in terminal streams.
+     */
     pub fn badge(&self) -> ColoredString {
         match self {
             PacketDirection::Sent => "[TX OUT]".bold().magenta(),
@@ -38,7 +46,10 @@ impl PacketDirection {
         }
     }
 
-    /// Evaluates whether the direction satisfies a CLI direction filter.
+    /*
+     * evaluates whether the direction satisfies a CLI direction filter.
+     * note: loopback traffic is considered both incoming and outgoing for filtering convenience.
+     */
     pub fn matches_filter(&self, filter: DirectionFilter) -> bool {
         match filter {
             DirectionFilter::All => true,
@@ -53,20 +64,22 @@ impl PacketDirection {
     }
 }
 
-/// Resolves packet direction by combining multiple network heuristics:
-/// 1. Loopback interface detection.
-/// 2. Linux Cooked Capture (SLL) packet type tags.
-/// 3. Source and destination MAC address matching against local interface MAC.
-/// 4. Source and destination IP matching against local interface IPs.
-/// 5. Broadcast / Multicast destination evaluation.
-///
-/// # Arguments
-/// * `sll_packet_type` - Linux cooked header packet type if captured via SLL.
-/// * `src_mac` - Extracted source MAC address.
-/// * `dst_mac` - Extracted destination MAC address.
-/// * `src_ip` - Extracted source IP address.
-/// * `dst_ip` - Extracted destination IP address.
-/// * `local` - Local identity parameters (interface MAC, IPs, loopback status).
+/*
+ * resolves packet direction by combining multiple network heuristics:
+ * 1. loopback interface detection.
+ * 2. linux cooked capture (SLL) packet type tags.
+ * 3. source and destination MAC address matching against local interface MAC.
+ * 4. source and destination IP matching against local interface IPs.
+ * 5. broadcast / multicast destination evaluation.
+ *
+ * arguments:
+ * * `sll_packet_type` - linux cooked header packet type if captured via SLL.
+ * * `src_mac` - extracted source MAC address.
+ * * `dst_mac` - extracted destination MAC address.
+ * * `src_ip` - extracted source IP address.
+ * * `dst_ip` - extracted destination IP address.
+ * * `local` - local identity parameters (interface MAC, IPs, loopback status).
+ */
 pub fn determine_direction(
     sll_packet_type: Option<u16>,
     src_mac: Option<[u8; 6]>,
@@ -75,18 +88,20 @@ pub fn determine_direction(
     dst_ip: Option<IpAddr>,
     local: &LocalIdentity,
 ) -> PacketDirection {
-    // 1. If captured on the local loopback interface
+    /* 1. if captured on the local loopback interface, categorize as loopback */
     if local.is_loopback {
         return PacketDirection::Loopback;
     }
 
-    // 2. Linux Cooked SLL packet type header check:
-    // Linux kernel classifies packets into:
-    // 0 = PACKET_HOST (to local machine)
-    // 1 = PACKET_BROADCAST (broadcast to local machine)
-    // 2 = PACKET_MULTICAST (multicast to local machine)
-    // 3 = PACKET_OTHERHOST (promiscuous mode, intended for someone else)
-    // 4 = PACKET_OUTGOING (transmitted by local machine)
+    /*
+     * 2. check linux cooked SLL packet type header:
+     * the linux kernel classifies packets into:
+     * 0 = PACKET_HOST (addressed directly to local machine)
+     * 1 = PACKET_BROADCAST (physical broadcast received by local machine)
+     * 2 = PACKET_MULTICAST (multicast frame received by local machine)
+     * 3 = PACKET_OTHERHOST (promiscuous mode, intended for another host)
+     * 4 = PACKET_OUTGOING (transmitted by local machine)
+     */
     if let Some(pkt_type) = sll_packet_type {
         match pkt_type {
             4 => return PacketDirection::Sent,
@@ -96,20 +111,22 @@ pub fn determine_direction(
         }
     }
 
-    // 3. Hardware MAC comparison against local interface MAC
+    /* 3. compare hardware MAC against local interface MAC */
     if let Some(local_mac) = local.mac {
+        /* if source MAC matches local MAC, packet originated locally (TX) */
         if let Some(smac) = src_mac {
             if smac == local_mac {
                 return PacketDirection::Sent;
             }
         }
+        /* if destination MAC matches local MAC, packet was delivered to us (RX) */
         if let Some(dmac) = dst_mac {
             if dmac == local_mac {
                 return PacketDirection::Received;
             }
-            // Check for broadcast MAC (FF:FF:FF:FF:FF:FF) or multicast bit
+            /* check for broadcast MAC (FF:FF:FF:FF:FF:FF) or multicast bit (least significant bit of first octet) */
             if dmac == [0xff; 6] || (dmac[0] & 0x01 != 0) {
-                // If destination is broadcast/multicast and not originated by us, it's received
+                /* if destination is broadcast/multicast and not originated by us, it was received (RX) */
                 if let Some(smac) = src_mac {
                     if smac != local_mac {
                         return PacketDirection::Received;
@@ -119,7 +136,7 @@ pub fn determine_direction(
         }
     }
 
-    // 4. IP address comparison against local interface IP bindings
+    /* 4. compare IP addresses against local interface IP bindings */
     if let Some(sip) = src_ip {
         if local.ips.contains(&sip) {
             return PacketDirection::Sent;
@@ -131,12 +148,13 @@ pub fn determine_direction(
         }
     }
 
-    // 5. Check if destination IP is broadcast (e.g. 255.255.255.255) or multicast
+    /* 5. check if destination IP is broadcast (e.g. 255.255.255.255) or multicast */
     if let Some(dip) = dst_ip {
         if dip.is_multicast() || dip == IpAddr::from([255, 255, 255, 255]) {
             return PacketDirection::Received;
         }
     }
 
+    /* fallback when none of the heuristics can conclusively identify direction */
     PacketDirection::Unknown
 }

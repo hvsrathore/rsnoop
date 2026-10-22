@@ -1,64 +1,85 @@
-//! Dynamic Host Configuration Protocol (DHCP) and Bootstrap Protocol (BOOTP) parser.
-//!
-//! Defined in RFC 2131 and RFC 2132, DHCP operates over UDP (server port 67, client port 68)
-//! to automatically assign IP addresses and network configuration parameters to client devices.
+/*
+ * Dynamic Host Configuration Protocol (DHCP) and Bootstrap Protocol (BOOTP) parser.
+ *
+ * flow of control in DHCP decoding:
+ * 1. entry point: called from `protocols::PacketParser::parse()` when UDP source or destination
+ *    port is 67 (DHCP server) or 68 (DHCP client).
+ * 2. length check: validates 240-byte minimum BOOTP header size (236 bytes header + 4 bytes magic cookie).
+ * 3. BOOTP header parsing: extracts opcode (BOOTREQUEST / BOOTREPLY), transaction ID (xid),
+ *    client IP (ciaddr), assigned IP (yiaddr), server IP (siaddr), gateway IP (giaddr),
+ *    and client hardware MAC address (chaddr).
+ * 4. magic cookie check: verifies bytes 236..240 match `[99, 130, 83, 99]` (0x63825363).
+ * 5. TLV options loop: iterates through variable-length options starting at byte offset 240:
+ *    - option 53 -> DHCP message type (Discover, Offer, Request, ACK, NAK, Release).
+ *    - option 50 -> requested IP address.
+ *    - option 54 -> DHCP server identifier IP.
+ *    - option 12 -> client host name.
+ * 6. summary construction: formats lease transaction details for compact and verbose output.
+ */
 
 use super::ethernet::format_mac;
 use std::net::Ipv4Addr;
 
-/// Decoded Dynamic Host Configuration Protocol (DHCP) packet information.
+/*
+ * decoded Dynamic Host Configuration Protocol (DHCP) packet information.
+ * corresponds to RFC 2131 and RFC 2132 specifications.
+ */
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DhcpInfo {
-    /// Message op code: 1 = BOOTREQUEST, 2 = BOOTREPLY.
+    /* message op code: 1 = BOOTREQUEST, 2 = BOOTREPLY. */
     pub op: u8,
-    /// Human-readable message op name.
+    /* human-readable message op name. */
     pub op_name: &'static str,
-    /// Transaction ID chosen by the client to match requests with replies.
+    /* transaction ID chosen by the client to match requests with replies. */
     pub xid: u32,
-    /// Client IP address (filled in if client already has an active lease).
+    /* client IP address (filled in if client already has an active lease). */
     pub ciaddr: Ipv4Addr,
-    /// "Your" (client) IP address offered or assigned by the DHCP server.
+    /* "your" (client) IP address offered or assigned by the DHCP server. */
     pub yiaddr: Ipv4Addr,
-    /// Next server IP address to use in bootstrap process.
+    /* next server IP address to use in bootstrap process. */
     pub siaddr: Ipv4Addr,
-    /// Relay agent (gateway) IP address.
+    /* relay agent (gateway) IP address. */
     pub giaddr: Ipv4Addr,
-    /// Client hardware MAC address (from chaddr field).
+    /* client hardware MAC address (from chaddr field). */
     pub chaddr: [u8; 6],
-    /// DHCP message type from Option 53 (e.g. Discover, Offer, Request, ACK).
+    /* DHCP message type from Option 53 (e.g. Discover, Offer, Request, ACK). */
     pub message_type: Option<DhcpMessageType>,
-    /// Requested IP address from Option 50.
+    /* requested IP address from Option 50. */
     pub requested_ip: Option<Ipv4Addr>,
-    /// DHCP server identifier from Option 54.
+    /* DHCP server identifier from Option 54. */
     pub server_identifier: Option<Ipv4Addr>,
-    /// Client host name from Option 12.
+    /* client host name from Option 12. */
     pub hostname: Option<String>,
 }
 
-/// DHCP message types defined in RFC 2132 Option 53.
+/*
+ * DHCP message types defined in RFC 2132 Option 53.
+ */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DhcpMessageType {
-    /// Client broadcast to locate available DHCP servers.
+    /* client broadcast to locate available DHCP servers. */
     Discover = 1,
-    /// Server response offering IP address parameters.
+    /* server response offering IP address parameters. */
     Offer = 2,
-    /// Client request to accept offered lease or renew existing lease.
+    /* client request to accept offered lease or renew existing lease. */
     Request = 3,
-    /// Client indication that offered address is already in use.
+    /* client indication that offered address is already in use. */
     Decline = 4,
-    /// Server acknowledgment committing the lease parameters.
+    /* server acknowledgment committing the lease parameters. */
     Ack = 5,
-    /// Server negative acknowledgment rejecting client request.
+    /* server negative acknowledgment rejecting client request. */
     Nak = 6,
-    /// Client notification releasing its assigned lease.
+    /* client notification releasing its assigned lease. */
     Release = 7,
-    /// Client request for local configuration parameters without lease assignment.
+    /* client request for local configuration parameters without lease assignment. */
     Inform = 8,
 }
 
 impl DhcpMessageType {
-    /// Returns the standard display name for the DHCP message type.
+    /*
+     * returns the standard display name for the DHCP message type.
+     */
     pub fn name(&self) -> &'static str {
         match self {
             DhcpMessageType::Discover => "Discover",
@@ -74,7 +95,9 @@ impl DhcpMessageType {
 }
 
 impl DhcpInfo {
-    /// Produces a concise summary string representing the DHCP packet.
+    /*
+     * produces a concise summary string representing the DHCP packet.
+     */
     pub fn summary(&self) -> String {
         let msg_name = self
             .message_type
@@ -99,20 +122,22 @@ impl DhcpInfo {
     }
 }
 
-/// Parses raw UDP payload into a [`DhcpInfo`] struct.
-///
-/// # Arguments
-/// * `slice` - Byte slice containing the BOOTP/DHCP message.
-///
-/// # Returns
-/// `Some(DhcpInfo)` if the packet contains a valid BOOTP/DHCP header and magic cookie.
+/*
+ * parses raw UDP payload into a `DhcpInfo` struct.
+ *
+ * arguments:
+ * * `slice` - byte slice containing the BOOTP/DHCP message.
+ *
+ * returns:
+ * `Some(DhcpInfo)` if the packet contains a valid BOOTP/DHCP header and magic cookie.
+ */
 pub fn parse_dhcp(slice: &[u8]) -> Option<DhcpInfo> {
-    // Minimum BOOTP header size is 236 bytes + 4 bytes magic cookie = 240
+    /* minimum BOOTP header size is 236 bytes + 4 bytes magic cookie = 240 */
     if slice.len() < 240 {
         return None;
     }
 
-    // Byte 0: Op code
+    /* byte 0: operation code (1 = BOOTREQUEST, 2 = BOOTREPLY) */
     let op = slice[0];
     let op_name = match op {
         1 => "BOOTREQUEST",
@@ -120,22 +145,22 @@ pub fn parse_dhcp(slice: &[u8]) -> Option<DhcpInfo> {
         _ => return None,
     };
 
-    // Bytes 4..8: Transaction ID (xid)
+    /* bytes 4..8: transaction ID (xid) */
     let xid = u32::from_be_bytes([slice[4], slice[5], slice[6], slice[7]]);
-    // Bytes 12..16: Client IP (ciaddr)
+    /* bytes 12..16: client IP (ciaddr) */
     let ciaddr = Ipv4Addr::new(slice[12], slice[13], slice[14], slice[15]);
-    // Bytes 16..20: "Your" IP (yiaddr)
+    /* bytes 16..20: "your" IP (yiaddr) */
     let yiaddr = Ipv4Addr::new(slice[16], slice[17], slice[18], slice[19]);
-    // Bytes 20..24: Server IP (siaddr)
+    /* bytes 20..24: server IP (siaddr) */
     let siaddr = Ipv4Addr::new(slice[20], slice[21], slice[22], slice[23]);
-    // Bytes 24..28: Gateway IP (giaddr)
+    /* bytes 24..28: gateway IP (giaddr) */
     let giaddr = Ipv4Addr::new(slice[24], slice[25], slice[26], slice[27]);
 
-    // Bytes 28..34: Client Hardware Address (chaddr - first 6 bytes for Ethernet MAC)
+    /* bytes 28..34: client hardware address (chaddr - first 6 bytes for Ethernet MAC) */
     let mut chaddr = [0u8; 6];
     chaddr.copy_from_slice(&slice[28..34]);
 
-    // Check DHCP Magic Cookie at bytes 236..240: 0x63 0x82 0x53 0x63
+    /* check DHCP magic cookie at bytes 236..240: 0x63 0x82 0x53 0x63 */
     let magic_cookie = &slice[236..240];
     if magic_cookie != [99, 130, 83, 99] {
         return None;
@@ -146,16 +171,16 @@ pub fn parse_dhcp(slice: &[u8]) -> Option<DhcpInfo> {
     let mut server_identifier = None;
     let mut hostname = None;
 
-    // Parse variable-length TLV (Type-Length-Value) DHCP options starting at offset 240
+    /* parse variable-length TLV (Type-Length-Value) DHCP options starting at offset 240 */
     let mut offset = 240;
     while offset < slice.len() {
         let opt_type = slice[offset];
         if opt_type == 255 {
-            // End Option (0xFF) marks completion of DHCP options
+            /* end Option (0xFF) marks completion of DHCP options list */
             break;
         }
         if opt_type == 0 {
-            // Pad Option (0x00) for byte alignment
+            /* pad Option (0x00) for byte alignment */
             offset += 1;
             continue;
         }
@@ -173,7 +198,7 @@ pub fn parse_dhcp(slice: &[u8]) -> Option<DhcpInfo> {
 
         match opt_type {
             53 if opt_len == 1 => {
-                // Option 53: DHCP Message Type
+                /* option 53: DHCP Message Type */
                 message_type = match opt_val[0] {
                     1 => Some(DhcpMessageType::Discover),
                     2 => Some(DhcpMessageType::Offer),
@@ -187,15 +212,15 @@ pub fn parse_dhcp(slice: &[u8]) -> Option<DhcpInfo> {
                 };
             }
             50 if opt_len == 4 => {
-                // Option 50: Requested IP Address
+                /* option 50: Requested IP Address */
                 requested_ip = Some(Ipv4Addr::new(opt_val[0], opt_val[1], opt_val[2], opt_val[3]));
             }
             54 if opt_len == 4 => {
-                // Option 54: Server Identifier
+                /* option 54: Server Identifier */
                 server_identifier = Some(Ipv4Addr::new(opt_val[0], opt_val[1], opt_val[2], opt_val[3]));
             }
             12 if opt_len > 0 => {
-                // Option 12: Host Name
+                /* option 12: Host Name */
                 hostname = Some(String::from_utf8_lossy(opt_val).to_string());
             }
             _ => {}

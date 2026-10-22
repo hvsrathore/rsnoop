@@ -1,10 +1,31 @@
-//! Protocol decoding engine and multi-layer packet representation.
-//!
-//! Handles sequential decoding of packets across network protocol layers:
-//! - Data Link Layer (L2): Ethernet II, IEEE 802.1Q (VLAN), Linux Cooked SLL/SLL2, BSD Loopback.
-//! - Network Layer (L3): IPv4, IPv6, ARP.
-//! - Transport Layer (L4): TCP, UDP, ICMPv4, ICMPv6.
-//! - Application Layer (L5/L7): DNS, HTTP, TLS, DHCP, NTP, SSH.
+/*
+ * protocol decoding engine and multi-layer packet representation.
+ *
+ * flow of control across protocol layers:
+ * 1. entry point: `PacketParser::parse()` receives raw packet bytes and datalink type from `main.rs`.
+ * 2. layer 2 (datalink): decodes framing based on datalink type (Ethernet, Linux SLL/SLL2, BSD loopback).
+ *    extracts hardware MAC addresses and determines the encapsulated network layer EtherType.
+ * 3. layer 3 (network): demuxes payload by EtherType:
+ *    - 0x0806 -> ARP (`arp::parse_arp`)
+ *    - 0x0800 -> IPv4 (`ip::parse_ipv4`)
+ *    - 0x86DD -> IPv6 (`ip::parse_ipv6`)
+ *    extracts IP addresses and encapsulated transport layer protocol number.
+ * 4. layer 4 (transport): demuxes transport slice by IP protocol number:
+ *    - 6 -> TCP (`tcp::parse_tcp`)
+ *    - 17 -> UDP (`udp::parse_udp`)
+ *    - 1 / 58 -> ICMPv4 / ICMPv6 (`icmp::parse_icmpv4` / `icmp::parse_icmpv6`)
+ *    extracts ports, sequence/ack numbers, flags, and payload slice.
+ * 5. layer 5/7 (application): inspects transport ports and payload magic bytes:
+ *    - port 53/5353 -> DNS (`dns::parse_dns`)
+ *    - port 67/68 -> DHCP (`dhcp::parse_dhcp`)
+ *    - port 123 -> NTP (`ntp::parse_ntp`)
+ *    - port 22 or "SSH-" prefix -> SSH (`ssh::parse_ssh`)
+ *    - port 443 or TLS record prefix -> TLS (`tls::parse_tls`)
+ *    - port 80 or HTTP verb/status -> HTTP (`http::parse_http`)
+ * 6. directional analysis: calls `direction::determine_direction()` comparing extracted
+ *    MACs/IPs against the host's `LocalIdentity`.
+ * 7. return: packages all layers into a unified `ParsedPacket` struct passed back to `main.rs`.
+ */
 
 pub mod arp;
 pub mod dhcp;
@@ -27,63 +48,75 @@ use chrono::{DateTime, Local, TimeZone};
 use pcap::Linktype;
 use std::net::IpAddr;
 
-/// Container for decoded Data Link Layer (L2) frame information.
+/*
+ * container for decoded Data Link Layer (L2) frame information.
+ * encapsulates either standard Ethernet II frames or Linux Cooked SLL frames.
+ */
 #[derive(Debug, Clone)]
 pub enum L2Info {
-    /// Standard Ethernet II frame.
+    /* standard Ethernet II frame header. */
     Ethernet(ethernet::EthernetInfo),
-    /// Linux Cooked Capture (SLL) frame.
+    /* Linux Cooked capture (SLL or SLL2) frame header. */
     Sll(sll::SllInfo),
 }
 
-/// Container for decoded Application Layer (L5/L7) protocol information.
+/*
+ * container for decoded Application Layer (L5/L7) protocol information.
+ * stores strongly-typed metadata for recognized upper-layer protocols.
+ */
 #[derive(Debug, Clone)]
 pub enum AppProtocol {
-    /// Domain Name System query or response.
+    /* Domain Name System (DNS) query or response. */
     Dns(dns::DnsInfo),
-    /// Hypertext Transfer Protocol request or response.
+    /* Hypertext Transfer Protocol (HTTP) request or response. */
     Http(http::HttpInfo),
-    /// Transport Layer Security record / handshake.
+    /* Transport Layer Security (TLS) record or handshake message. */
     Tls(tls::TlsInfo),
-    /// Dynamic Host Configuration Protocol message.
+    /* Dynamic Host Configuration Protocol (DHCP) message. */
     Dhcp(dhcp::DhcpInfo),
-    /// Network Time Protocol clock sync packet.
+    /* Network Time Protocol (NTP) clock synchronization packet. */
     Ntp(ntp::NtpInfo),
-    /// Secure Shell version identification banner.
+    /* Secure Shell (SSH) version identification banner. */
     Ssh(ssh::SshInfo),
 }
 
-/// Fully decoded representation of a captured network packet across all layers.
+/*
+ * fully decoded representation of a captured network packet across all layers.
+ * this struct is passed through the filtering, display, and statistics pipelines.
+ */
 #[derive(Debug, Clone)]
 pub struct ParsedPacket {
-    /// Sequential capture index (1-based).
+    /* sequential capture index (1-based counter). */
     pub packet_num: usize,
-    /// Wall-clock timestamp when the packet was captured.
+    /* wall-clock timestamp when the packet was captured. */
     pub timestamp: DateTime<Local>,
-    /// Total wire length of the packet in bytes.
+    /* total wire length of the packet in bytes. */
     pub raw_len: usize,
-    /// Traffic flow direction: Sent (TX), Received (RX), Loopback, or Promiscuous.
+    /* traffic flow direction: Sent (TX), Received (RX), Loopback, or Promiscuous. */
     pub direction: PacketDirection,
-    /// Decoded Data Link Layer (L2) header if available.
+    /* decoded Data Link Layer (L2) header if available. */
     pub l2: Option<L2Info>,
-    /// Decoded Address Resolution Protocol (ARP) header if present.
+    /* decoded Address Resolution Protocol (ARP) header if present. */
     pub arp: Option<arp::ArpInfo>,
-    /// Decoded Internet Protocol (IPv4 or IPv6) header if present.
+    /* decoded Internet Protocol (IPv4 or IPv6) header if present. */
     pub ip: Option<ip::IpInfo>,
-    /// Decoded Transmission Control Protocol (TCP) header if present.
+    /* decoded Transmission Control Protocol (TCP) header if present. */
     pub tcp: Option<tcp::TcpInfo>,
-    /// Decoded User Datagram Protocol (UDP) header if present.
+    /* decoded User Datagram Protocol (UDP) header if present. */
     pub udp: Option<udp::UdpInfo>,
-    /// Decoded Internet Control Message Protocol (ICMP) header if present.
+    /* decoded Internet Control Message Protocol (ICMP) header if present. */
     pub icmp: Option<icmp::IcmpInfo>,
-    /// Decoded Application Layer (L5/L7) protocol if recognized.
+    /* decoded Application Layer (L5/L7) protocol if recognized. */
     pub app: Option<AppProtocol>,
-    /// Remaining unparsed payload bytes (used for hex dumps and deep inspection).
+    /* remaining unparsed payload bytes (used for hex dumps and deep inspection). */
     pub payload: Vec<u8>,
 }
 
 impl ParsedPacket {
-    /// Returns the primary protocol name for display badges (e.g. "DNS", "TLS", "TCP", "ARP").
+    /*
+     * returns the primary protocol name for display badges (e.g. "DNS", "TLS", "TCP", "ARP").
+     * prioritizes the highest decoded protocol layer for display prominence.
+     */
     pub fn display_protocol(&self) -> &'static str {
         if let Some(app) = &self.app {
             match app {
@@ -112,7 +145,10 @@ impl ParsedPacket {
         }
     }
 
-    /// Evaluates whether this packet satisfies the user's protocol filter option.
+    /*
+     * evaluates whether this packet satisfies the user's protocol filter option.
+     * checks if the requested protocol was identified during multi-layer decoding.
+     */
     pub fn matches_protocol(&self, filter: ProtocolFilter) -> bool {
         match filter {
             ProtocolFilter::All => true,
@@ -131,7 +167,10 @@ impl ParsedPacket {
         }
     }
 
-    /// Evaluates whether this packet satisfies the user's port filter option.
+    /*
+     * evaluates whether this packet satisfies the user's port filter option.
+     * matches either source or destination port on TCP segments or UDP datagrams.
+     */
     pub fn matches_port(&self, port: Option<u16>) -> bool {
         if let Some(target_port) = port {
             if let Some(tcp) = &self.tcp {
@@ -147,30 +186,41 @@ impl ParsedPacket {
     }
 }
 
-/// Packet decoder instance holding local interface identity for directional resolution.
+/*
+ * packet decoder instance holding local interface identity for directional resolution.
+ * retains a borrow of the capturing interface's `LocalIdentity` throughout the capture session.
+ */
 pub struct PacketParser<'a> {
     local_identity: &'a LocalIdentity,
 }
 
 impl<'a> PacketParser<'a> {
-    /// Creates a new packet parser with reference to the capturing interface's local identity.
+    /*
+     * creates a new packet parser with reference to the capturing interface's local identity.
+     */
     pub fn new(local_identity: &'a LocalIdentity) -> Self {
         Self { local_identity }
     }
 
-    /// Parses a raw libpcap packet into a structured [`ParsedPacket`].
-    ///
-    /// # Arguments
-    /// * `packet_num` - Monotonically increasing packet index.
-    /// * `packet` - Raw captured packet from libpcap.
-    /// * `linktype` - Datalink type of the capture interface.
+    /*
+     * parses a raw libpcap packet into a structured `ParsedPacket`.
+     *
+     * flow of control through parsing steps:
+     * - converts hardware timestamp from microseconds to `DateTime<Local>`.
+     * - step 1: demuxes link layer based on `linktype` (Ethernet II, Linux Cooked SLL/SLL2, BSD Loopback).
+     * - step 2: demuxes network layer based on EtherType (IPv4, IPv6, ARP).
+     * - step 3: demuxes transport layer based on IP protocol (TCP, UDP, ICMPv4, ICMPv6).
+     * - step 4: demuxes application layer based on port numbers and payload signatures (DNS, DHCP, NTP, SSH, TLS, HTTP).
+     * - step 5: resolves packet direction (Sent vs Received vs Loopback) using `determine_direction`.
+     * - step 6: returns completed `ParsedPacket`.
+     */
     pub fn parse(
         &self,
         packet_num: usize,
         packet: &pcap::Packet,
         linktype: Linktype,
     ) -> ParsedPacket {
-        // Convert microsecond timestamp to chrono DateTime
+        /* convert microsecond capture timestamp to local datetime */
         let ts = Local
             .timestamp_opt(packet.header.ts.tv_sec, (packet.header.ts.tv_usec * 1000) as u32)
             .single()
@@ -184,11 +234,12 @@ impl<'a> PacketParser<'a> {
         let mut src_mac = None;
         let mut dst_mac = None;
         let mut next_slice = raw_data;
-        let mut ether_type = 0x0800; // default IPv4 if raw link
+        let mut ether_type = 0x0800; /* default to IPv4 if raw link type */
 
-        // Step 1: Decode Data Link Layer (L2) based on capture datalink type
+        /* step 1: decode Data Link Layer (L2) based on capture datalink type */
         match linktype {
             Linktype::ETHERNET => {
+                /* parse standard IEEE 802.3 / Ethernet II framing */
                 if let Some((eth, rest)) = ethernet::parse_ethernet(raw_data) {
                     src_mac = Some(eth.src_mac);
                     dst_mac = Some(eth.dst_mac);
@@ -198,6 +249,7 @@ impl<'a> PacketParser<'a> {
                 }
             }
             Linktype::LINUX_SLL => {
+                /* parse Linux Cooked capture v1 (used by "any" pseudo-device) */
                 if let Some((sll, rest)) = sll::parse_sll(raw_data) {
                     sll_pkttype = Some(sll.packet_type);
                     ether_type = sll.protocol;
@@ -207,6 +259,7 @@ impl<'a> PacketParser<'a> {
                 }
             }
             Linktype::LINUX_SLL2 => {
+                /* parse Linux Cooked capture v2 */
                 if let Some((sll2, rest)) = sll::parse_sll2(raw_data) {
                     sll_pkttype = Some(sll2.packet_type);
                     ether_type = sll2.protocol;
@@ -216,13 +269,13 @@ impl<'a> PacketParser<'a> {
                 }
             }
             Linktype::NULL | Linktype::LOOP => {
-                // BSD Loopback format: 4-byte address family prefix
+                /* parse BSD Loopback framing: 4-byte native endian address family prefix */
                 if raw_data.len() >= 4 {
                     let family = u32::from_ne_bytes([raw_data[0], raw_data[1], raw_data[2], raw_data[3]]);
                     if family == 2 {
-                        ether_type = 0x0800; // IPv4
+                        ether_type = 0x0800; /* AF_INET = IPv4 */
                     } else if family == 24 || family == 28 || family == 30 {
-                        ether_type = 0x86DD; // IPv6
+                        ether_type = 0x86DD; /* AF_INET6 = IPv6 */
                     }
                     next_slice = &raw_data[4..];
                 }
@@ -234,7 +287,7 @@ impl<'a> PacketParser<'a> {
                 ether_type = 0x86DD;
             }
             _ => {
-                // Fallback attempt: try parsing as Ethernet if length >= 14
+                /* fallback attempt: try parsing as Ethernet if slice is at least 14 bytes */
                 if let Some((eth, rest)) = ethernet::parse_ethernet(raw_data) {
                     src_mac = Some(eth.src_mac);
                     dst_mac = Some(eth.dst_mac);
@@ -256,10 +309,10 @@ impl<'a> PacketParser<'a> {
         let mut src_ip: Option<IpAddr> = None;
         let mut dst_ip: Option<IpAddr> = None;
 
-        // Step 2: Decode Network Layer (L3) based on EtherType
+        /* step 2: decode Network Layer (L3) based on EtherType */
         match ether_type {
             0x0806 => {
-                // Address Resolution Protocol (ARP)
+                /* Address Resolution Protocol (ARP) */
                 if let Some(arp) = arp::parse_arp(next_slice) {
                     src_ip = Some(IpAddr::V4(arp.sender_ip));
                     dst_ip = Some(IpAddr::V4(arp.target_ip));
@@ -268,7 +321,7 @@ impl<'a> PacketParser<'a> {
                 }
             }
             0x0800 => {
-                // Internet Protocol v4 (IPv4)
+                /* Internet Protocol version 4 (IPv4) */
                 if let Some((v4, transport_slice)) = ip::parse_ipv4(next_slice) {
                     src_ip = Some(IpAddr::V4(v4.src));
                     dst_ip = Some(IpAddr::V4(v4.dst));
@@ -276,24 +329,24 @@ impl<'a> PacketParser<'a> {
                     ip_info = Some(ip::IpInfo::V4(v4));
                     payload_slice = transport_slice;
 
-                    // Step 3: Decode Transport Layer (L4) for IPv4
+                    /* step 3: decode Transport Layer (L4) for IPv4 */
                     match proto {
                         6 => {
-                            // TCP
+                            /* Transmission Control Protocol (TCP) */
                             if let Some((tcp, l7_slice)) = tcp::parse_tcp(transport_slice) {
                                 tcp_info = Some(tcp);
                                 payload_slice = l7_slice;
                             }
                         }
                         17 => {
-                            // UDP
+                            /* User Datagram Protocol (UDP) */
                             if let Some((udp, l7_slice)) = udp::parse_udp(transport_slice) {
                                 udp_info = Some(udp);
                                 payload_slice = l7_slice;
                             }
                         }
                         1 => {
-                            // ICMPv4
+                            /* Internet Control Message Protocol v4 (ICMPv4) */
                             if let Some(icmp_v4) = icmp::parse_icmpv4(transport_slice) {
                                 icmp_info = Some(icmp::IcmpInfo::V4(icmp_v4));
                                 payload_slice = if transport_slice.len() > 8 {
@@ -308,7 +361,7 @@ impl<'a> PacketParser<'a> {
                 }
             }
             0x86DD => {
-                // Internet Protocol v6 (IPv6)
+                /* Internet Protocol version 6 (IPv6) */
                 if let Some((v6, transport_slice)) = ip::parse_ipv6(next_slice) {
                     src_ip = Some(IpAddr::V6(v6.src));
                     dst_ip = Some(IpAddr::V6(v6.dst));
@@ -316,24 +369,24 @@ impl<'a> PacketParser<'a> {
                     ip_info = Some(ip::IpInfo::V6(v6));
                     payload_slice = transport_slice;
 
-                    // Step 3: Decode Transport Layer (L4) for IPv6
+                    /* step 3: decode Transport Layer (L4) for IPv6 */
                     match proto {
                         6 => {
-                            // TCP
+                            /* Transmission Control Protocol (TCP) */
                             if let Some((tcp, l7_slice)) = tcp::parse_tcp(transport_slice) {
                                 tcp_info = Some(tcp);
                                 payload_slice = l7_slice;
                             }
                         }
                         17 => {
-                            // UDP
+                            /* User Datagram Protocol (UDP) */
                             if let Some((udp, l7_slice)) = udp::parse_udp(transport_slice) {
                                 udp_info = Some(udp);
                                 payload_slice = l7_slice;
                             }
                         }
                         58 => {
-                            // ICMPv6
+                            /* Internet Control Message Protocol v6 (ICMPv6) */
                             if let Some(icmp_v6) = icmp::parse_icmpv6(transport_slice) {
                                 icmp_info = Some(icmp::IcmpInfo::V6(icmp_v6));
                                 payload_slice = if transport_slice.len() > 8 {
@@ -350,7 +403,7 @@ impl<'a> PacketParser<'a> {
             _ => {}
         }
 
-        // Step 4: Decode Application Layer (L5/L7)
+        /* step 4: decode Application Layer (L5/L7) if transport payload exists */
         if !payload_slice.is_empty() {
             let (src_p, dst_p) = if let Some(tcp) = &tcp_info {
                 (tcp.src_port, tcp.dst_port)
@@ -360,42 +413,42 @@ impl<'a> PacketParser<'a> {
                 (0, 0)
             };
 
-            // 1. DNS: UDP/TCP port 53 or 5353 (mDNS)
+            /* 1. DNS: UDP/TCP port 53 or 5353 (mDNS) */
             if (src_p == 53 || dst_p == 53 || src_p == 5353 || dst_p == 5353) && app_info.is_none() {
                 if let Some(dns) = dns::parse_dns(payload_slice) {
                     app_info = Some(AppProtocol::Dns(dns));
                 }
             }
 
-            // 2. DHCP: UDP port 67 (server) or 68 (client)
+            /* 2. DHCP: UDP port 67 (server) or 68 (client) */
             if (src_p == 67 || dst_p == 67 || src_p == 68 || dst_p == 68) && app_info.is_none() {
                 if let Some(dhcp) = dhcp::parse_dhcp(payload_slice) {
                     app_info = Some(AppProtocol::Dhcp(dhcp));
                 }
             }
 
-            // 3. NTP: UDP port 123
+            /* 3. NTP: UDP port 123 */
             if (src_p == 123 || dst_p == 123) && app_info.is_none() {
                 if let Some(ntp) = ntp::parse_ntp(payload_slice) {
                     app_info = Some(AppProtocol::Ntp(ntp));
                 }
             }
 
-            // 4. SSH: TCP port 22 or SSH protocol banner prefix
+            /* 4. SSH: TCP port 22 or payload starting with "SSH-" banner prefix */
             if (src_p == 22 || dst_p == 22 || payload_slice.starts_with(b"SSH-")) && app_info.is_none() {
                 if let Some(ssh) = ssh::parse_ssh(payload_slice) {
                     app_info = Some(AppProtocol::Ssh(ssh));
                 }
             }
 
-            // 5. TLS: Port 443, 8443, or TLS record content type prefix (20..=24)
+            /* 5. TLS: port 443, 8443, or TLS record content type prefix (20..=24) */
             if app_info.is_none() {
                 if let Some(tls) = tls::parse_tls(payload_slice) {
                     app_info = Some(AppProtocol::Tls(tls));
                 }
             }
 
-            // 6. HTTP: Port 80, 8080, or HTTP method/response prefix
+            /* 6. HTTP: port 80, 8080, or HTTP request method / response status line prefix */
             if app_info.is_none() {
                 if let Some(http) = http::parse_http(payload_slice) {
                     app_info = Some(AppProtocol::Http(http));
@@ -403,7 +456,7 @@ impl<'a> PacketParser<'a> {
             }
         }
 
-        // Step 5: Accurately resolve packet direction (Sent vs. Received vs. Loopback)
+        /* step 5: resolve packet direction (Sent vs. Received vs. Loopback) */
         let direction = determine_direction(
             sll_pkttype,
             src_mac,
@@ -413,6 +466,7 @@ impl<'a> PacketParser<'a> {
             self.local_identity,
         );
 
+        /* step 6: return the fully populated multi-layer packet descriptor */
         ParsedPacket {
             packet_num,
             timestamp: ts,

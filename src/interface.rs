@@ -1,8 +1,10 @@
-//! Network interface discovery and local host identity resolution.
-//!
-//! Provides utilities to inspect local network interfaces, parse hardware MAC addresses
-//! directly from Linux sysfs (`/sys/class/net/<iface>/address`), discover assigned IPv4/IPv6
-//! addresses, and select appropriate default capture devices.
+/*
+ * network interface discovery and local host identity resolution.
+ *
+ * provides utilities to inspect local network interfaces, parse hardware MAC addresses
+ * directly from Linux sysfs (`/sys/class/net/<iface>/address`), discover assigned IPv4/IPv6
+ * addresses, and select appropriate default capture devices.
+ */
 
 use colored::Colorize;
 use pcap::Device;
@@ -10,35 +12,47 @@ use std::collections::HashSet;
 use std::fs;
 use std::net::IpAddr;
 
-/// Metadata describing a local host network interface.
+/*
+ * metadata describing a local host network interface.
+ * stores physical layer parameters (MAC address), network layer parameters (IP addresses),
+ * and interface operational state (up/down/loopback).
+ */
 #[derive(Debug, Clone)]
 pub struct InterfaceInfo {
-    /// Kernel device name (e.g. "eth0", "wlan0", "lo").
+    /* kernel device name (e.g. "eth0", "wlan0", "lo"). */
     pub name: String,
-    /// Operating system provided description if available.
+    /* operating system provided description if available. */
     pub description: Option<String>,
-    /// 6-byte hardware MAC address if available.
+    /* 6-byte hardware MAC address if available. */
     pub mac: Option<[u8; 6]>,
-    /// Formatted MAC address string (e.g. "00:11:22:33:44:55").
+    /* formatted MAC address string (e.g. "00:11:22:33:44:55"). */
     pub mac_str: Option<String>,
-    /// List of assigned IPv4 and IPv6 addresses.
+    /* list of assigned IPv4 and IPv6 addresses. */
     pub ips: Vec<IpAddr>,
-    /// Whether this interface is a loopback adapter.
+    /* whether this interface is a loopback adapter. */
     pub is_loopback: bool,
-    /// Whether the interface is operational (UP).
+    /* whether the interface is operational (UP). */
     pub is_up: bool,
 }
 
 impl InterfaceInfo {
-    /// Attempts to read the hardware MAC address from Linux sysfs (`/sys/class/net/<iface>/address`).
+    /*
+     * attempts to read the hardware MAC address from Linux sysfs (`/sys/class/net/<iface>/address`).
+     * reads the pseudo-filesystem file containing standard colon-separated hex octets,
+     * parses each hex byte, and returns a fixed 6-byte array if valid.
+     */
     pub fn read_mac(iface_name: &str) -> Option<[u8; 6]> {
+        /* construct path to sysfs address file for the specified network interface */
         let path = format!("/sys/class/net/{}/address", iface_name);
         let content = fs::read_to_string(path).ok()?;
         let trimmed = content.trim();
+
+        /* split into colon-delimited hex octet substrings */
         let parts: Vec<&str> = trimmed.split(':').collect();
         if parts.len() == 6 {
             let mut mac = [0u8; 6];
             for (i, part) in parts.iter().enumerate() {
+                /* parse each octet as a base-16 unsigned 8-bit integer */
                 mac[i] = u8::from_str_radix(part, 16).ok()?;
             }
             Some(mac)
@@ -47,27 +61,42 @@ impl InterfaceInfo {
         }
     }
 
-    /// Reads operational state from Linux sysfs (`/sys/class/net/<iface>/operstate`).
+    /*
+     * reads operational state from Linux sysfs (`/sys/class/net/<iface>/operstate`).
+     * returns true if the interface state is "up" or "unknown" (loopback interfaces
+     * often report "unknown" state while being fully operational).
+     */
     pub fn is_iface_up(iface_name: &str) -> bool {
         let path = format!("/sys/class/net/{}/operstate", iface_name);
         if let Ok(state) = fs::read_to_string(path) {
             let s = state.trim().to_lowercase();
-            return s == "up" || s == "unknown"; // loopback is frequently reported as "unknown"
+            /* treat both "up" and "unknown" (common for loopback) as operational */
+            return s == "up" || s == "unknown";
         }
+        /* default to true if sysfs is not accessible, allowing capture attempts */
         true
     }
 
-    /// Constructs an [`InterfaceInfo`] descriptor from a libpcap [`Device`].
+    /*
+     * constructs an `InterfaceInfo` descriptor from a libpcap `Device`.
+     * queries Linux sysfs for physical MAC address and operational state,
+     * and extracts all configured IPv4/IPv6 addresses.
+     */
     pub fn from_device(device: &Device) -> Self {
+        /* retrieve hardware MAC address from sysfs */
         let mac = Self::read_mac(&device.name);
+        /* format MAC bytes into standard colon-delimited hex representation */
         let mac_str = mac.map(|m| {
             format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 m[0], m[1], m[2], m[3], m[4], m[5]
             )
         });
+        /* extract all assigned IPv4 and IPv6 network addresses */
         let ips: Vec<IpAddr> = device.addresses.iter().map(|a| a.addr).collect();
+        /* check if this device is identified as the loopback adapter */
         let is_loopback = device.name == "lo" || device.flags.is_loopback();
+        /* inspect operstate to determine if interface link is UP */
         let is_up = Self::is_iface_up(&device.name);
 
         Self {
@@ -82,8 +111,13 @@ impl InterfaceInfo {
     }
 }
 
-/// Enumerates all network interfaces and prints a formatted, color-coded summary table.
+/*
+ * enumerates all network interfaces and prints a formatted, color-coded summary table.
+ * displays interface name, MAC address, UP/DOWN status, configured IP addresses,
+ * and description to stdout.
+ */
 pub fn print_interface_list() -> Result<(), pcap::Error> {
+    /* list all host network interfaces discovered by libpcap */
     let devices = Device::list()?;
     println!("{}", "=== Available Network Interfaces ===".bold().cyan());
     println!(
@@ -92,6 +126,7 @@ pub fn print_interface_list() -> Result<(), pcap::Error> {
     );
     println!("{:-<95}", "");
 
+    /* iterate through each discovered device and display row in table */
     for dev in devices {
         let info = InterfaceInfo::from_device(&dev);
         let mac = info.mac_str.unwrap_or_else(|| "N/A".to_string());
@@ -100,6 +135,7 @@ pub fn print_interface_list() -> Result<(), pcap::Error> {
         } else {
             "DOWN".red()
         };
+        /* format comma-separated string of all assigned IP addresses */
         let ips_str = if info.ips.is_empty() {
             "None".dimmed().to_string()
         } else {
@@ -124,19 +160,21 @@ pub fn print_interface_list() -> Result<(), pcap::Error> {
     Ok(())
 }
 
-/// Selects the most appropriate default active interface for capture.
-/// Priority heuristic:
-/// 1. Operational non-loopback device with an assigned IP address.
-/// 2. Any operational non-loopback device.
-/// 3. Loopback ("lo").
-/// 4. First device listed by the OS.
+/*
+ * selects the most appropriate default active interface for capture.
+ * priority heuristic:
+ * 1. operational non-loopback device with an assigned IP address.
+ * 2. any operational non-loopback device.
+ * 3. loopback ("lo").
+ * 4. first device listed by the OS.
+ */
 pub fn select_default_interface() -> Result<Device, String> {
     let devices = Device::list().map_err(|e| format!("Failed to list devices: {}", e))?;
     if devices.is_empty() {
         return Err("No network interfaces found on this system.".to_string());
     }
 
-    // 1. Look for active non-loopback interface with an assigned IP
+    /* 1. look for active non-loopback interface with an assigned IP address */
     for dev in &devices {
         let info = InterfaceInfo::from_device(dev);
         if !info.is_loopback && info.is_up && !info.ips.is_empty() {
@@ -144,7 +182,7 @@ pub fn select_default_interface() -> Result<Device, String> {
         }
     }
 
-    // 2. Look for any active non-loopback interface
+    /* 2. look for any active non-loopback interface even without an IP */
     for dev in &devices {
         let info = InterfaceInfo::from_device(dev);
         if !info.is_loopback && info.is_up {
@@ -152,30 +190,36 @@ pub fn select_default_interface() -> Result<Device, String> {
         }
     }
 
-    // 3. Fall back to loopback if available
+    /* 3. fall back to loopback interface if available */
     for dev in &devices {
         if dev.name == "lo" {
             return Ok(dev.clone());
         }
     }
 
-    // 4. Fall back to first device
+    /* 4. fall back to the very first device in the system device list */
     Ok(devices[0].clone())
 }
 
-/// Represents the network identity of the local capturing machine.
-/// Used by the directional analyzer to distinguish TX (Sent) from RX (Received).
+/*
+ * represents the network identity of the local capturing machine.
+ * used by the directional analyzer to distinguish TX (Sent) from RX (Received)
+ * by checking if source/destination addresses match the capturing host.
+ */
 pub struct LocalIdentity {
-    /// Local hardware MAC address.
+    /* local hardware MAC address. */
     pub mac: Option<[u8; 6]>,
-    /// Set of local IP addresses (IPv4 & IPv6).
+    /* set of local IP addresses (IPv4 & IPv6). */
     pub ips: HashSet<IpAddr>,
-    /// Whether the capturing device is loopback.
+    /* whether the capturing device is loopback. */
     pub is_loopback: bool,
 }
 
 impl LocalIdentity {
-    /// Constructs a `LocalIdentity` from interface metadata.
+    /*
+     * constructs a `LocalIdentity` from interface metadata.
+     * populates a hash set with local IPs for fast O(1) membership lookups during packet processing.
+     */
     pub fn new(iface_info: &InterfaceInfo) -> Self {
         let mut ips = HashSet::new();
         for ip in &iface_info.ips {

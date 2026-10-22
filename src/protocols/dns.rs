@@ -1,75 +1,88 @@
-//! Domain Name System (DNS) protocol parser.
-//!
-//! Defined in RFC 1035, DNS translates human-readable hostnames into numeric IP addresses
-//! and queries resource records across distributed authoritative name servers.
-//!
-//! This module implements a zero-copy wire-format DNS parser supporting:
-//! - Header parsing (Transaction ID, QR flag, Opcode, RCode, Section counts).
-//! - Question section parsing with DNS label pointer compression handling (0xC0 prefix).
-//! - Resource record answer parsing for A, AAAA, CNAME, MX, TXT, PTR, SRV, etc.
+/*
+ * Domain Name System (DNS) protocol parser.
+ *
+ * flow of control in DNS decoding:
+ * 1. entry point: called from `protocols::PacketParser::parse()` when source or destination
+ *    port is 53 (standard DNS) or 5353 (multicast DNS / mDNS).
+ * 2. header verification: validates 12-byte fixed header (Transaction ID, flags, opcode, rcode, counts).
+ * 3. question parsing: loops through question records; parses domain names by handling RFC 1035
+ *    label length prefixes and compression pointers (0xC0).
+ * 4. answer parsing: loops through resource records; decodes record types (A, AAAA, CNAME, PTR, TXT),
+ *    extracts TTL, and formats RDATA into human-readable strings (e.g. IPv4/IPv6 addresses or canonical names).
+ * 5. summary construction: produces concise query/response summary string for terminal output.
+ */
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-/// Decoded DNS header, question list, and answer list.
+/*
+ * decoded DNS header, question list, and answer list.
+ * corresponds to RFC 1035 wire specifications.
+ */
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DnsInfo {
-    /// 16-bit identifier assigned by the program generating the query.
+    /* 16-bit identifier assigned by the program generating the query. */
     pub transaction_id: u16,
-    /// Query (false) or Response (true) flag.
+    /* query (false) or response (true) flag. */
     pub is_response: bool,
-    /// 4-bit operation code (0 = Standard Query, 1 = Inverse Query, 2 = Status).
+    /* 4-bit operation code (0 = Standard Query, 1 = Inverse Query, 2 = Status). */
     pub opcode: u8,
-    /// 4-bit response code (0 = NoError, 3 = NXDomain, etc.).
+    /* 4-bit response code (0 = NoError, 3 = NXDomain, etc.). */
     pub rcode: u8,
-    /// Human-readable response code description.
+    /* human-readable response code description. */
     pub rcode_name: &'static str,
-    /// Number of entries in the question section.
+    /* number of entries in the question section. */
     pub qd_count: u16,
-    /// Number of resource records in the answer section.
+    /* number of resource records in the answer section. */
     pub an_count: u16,
-    /// Number of name server resource records in the authority records section.
+    /* number of name server resource records in the authority records section. */
     pub ns_count: u16,
-    /// Number of resource records in the additional records section.
+    /* number of resource records in the additional records section. */
     pub ar_count: u16,
-    /// Parsed queries from the question section.
+    /* parsed queries from the question section. */
     pub questions: Vec<DnsQuestion>,
-    /// Parsed resource records from the answer section.
+    /* parsed resource records from the answer section. */
     pub answers: Vec<DnsAnswer>,
 }
 
-/// A single DNS query entry from the Question section.
+/*
+ * a single DNS query entry from the Question section.
+ */
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DnsQuestion {
-    /// Fully qualified domain name queried (e.g. "www.example.com").
+    /* fully qualified domain name queried (e.g. "www.example.com"). */
     pub name: String,
-    /// Resource record type number (e.g. 1 for A, 28 for AAAA).
+    /* resource record type number (e.g. 1 for A, 28 for AAAA). */
     pub qtype: u16,
-    /// Human-readable query type name (e.g. "A", "AAAA", "CNAME").
+    /* human-readable query type name (e.g. "A", "AAAA", "CNAME"). */
     pub qtype_name: &'static str,
-    /// Query class (e.g. 1 for IN / Internet).
+    /* query class (e.g. 1 for IN / Internet). */
     pub qclass: u16,
 }
 
-/// A single DNS resource record from the Answer section.
+/*
+ * a single DNS resource record from the Answer section.
+ */
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct DnsAnswer {
-    /// Domain name to which this resource record pertains.
+    /* domain name to which this resource record pertains. */
     pub name: String,
-    /// Resource record type number.
+    /* resource record type number. */
     pub atype: u16,
-    /// Human-readable type name.
+    /* human-readable type name. */
     pub atype_name: &'static str,
-    /// Time-to-live in seconds before the record should be discarded from cache.
+    /* time-to-live in seconds before the record should be discarded from cache. */
     pub ttl: u32,
-    /// Formatted string representation of the record's RDATA (e.g. IP address or CNAME target).
+    /* formatted string representation of the record's RDATA (e.g. IP address or CNAME target). */
     pub data: String,
 }
 
 impl DnsInfo {
-    /// Returns a concise one-line summary of the DNS exchange.
+    /*
+     * returns a concise one-line summary of the DNS exchange.
+     */
     pub fn summary(&self) -> String {
         let op_str = if self.is_response {
             "response"
@@ -102,7 +115,9 @@ impl DnsInfo {
     }
 }
 
-/// Converts a numeric DNS record type to its standard mnemonic.
+/*
+ * converts a numeric DNS record type to its standard mnemonic.
+ */
 pub fn dns_type_to_str(qtype: u16) -> &'static str {
     match qtype {
         1 => "A",
@@ -120,7 +135,9 @@ pub fn dns_type_to_str(qtype: u16) -> &'static str {
     }
 }
 
-/// Converts a 4-bit DNS response code (RCODE) to its standard name.
+/*
+ * converts a 4-bit DNS response code (RCODE) to its standard name.
+ */
 pub fn dns_rcode_to_str(rcode: u8) -> &'static str {
     match rcode {
         0 => "NoError",
@@ -133,12 +150,14 @@ pub fn dns_rcode_to_str(rcode: u8) -> &'static str {
     }
 }
 
-/// Parses a DNS domain name from wire format, following RFC 1035 compression pointers.
-///
-/// In RFC 1035:
-/// - A normal label starts with a length octet (0..63) followed by that many characters.
-/// - A compression pointer starts with top 2 bits set (0xC0), followed by a 14-bit offset
-///   pointing to where the domain name continues elsewhere in the packet.
+/*
+ * parses a DNS domain name from wire format, following RFC 1035 compression pointers.
+ *
+ * in RFC 1035:
+ * - a normal label starts with a length octet (0..63) followed by that many characters.
+ * - a compression pointer starts with top 2 bits set (0xC0), followed by a 14-bit offset
+ *   pointing to where the domain name continues elsewhere in the packet.
+ */
 fn parse_domain_name(slice: &[u8], mut offset: usize) -> Option<(String, usize)> {
     let mut labels = Vec::new();
     let mut jumped = false;
@@ -146,14 +165,14 @@ fn parse_domain_name(slice: &[u8], mut offset: usize) -> Option<(String, usize)>
     let mut jump_count = 0;
 
     loop {
-        // Guard against malformed packets with circular pointer loops
+        /* guard against malformed packets with circular pointer loops */
         if offset >= slice.len() || jump_count > 10 {
             return None;
         }
 
         let len = slice[offset] as usize;
 
-        // Pointer (compression): top 2 bits are 11 (0xC0)
+        /* pointer (compression): top 2 bits are 11 (0xC0) */
         if (len & 0xC0) == 0xC0 {
             if offset + 1 >= slice.len() {
                 return None;
@@ -169,7 +188,7 @@ fn parse_domain_name(slice: &[u8], mut offset: usize) -> Option<(String, usize)>
         }
 
         offset += 1;
-        // Zero length marks root label (end of name)
+        /* zero length marks root label (end of name) */
         if len == 0 {
             if !jumped {
                 final_offset = offset;
@@ -195,15 +214,17 @@ fn parse_domain_name(slice: &[u8], mut offset: usize) -> Option<(String, usize)>
     Some((name, final_offset))
 }
 
-/// Parses raw UDP or TCP application payload into a [`DnsInfo`] structure.
-///
-/// # Arguments
-/// * `slice` - Byte slice containing the DNS packet.
-///
-/// # Returns
-/// `Some(DnsInfo)` if parsed successfully, or `None` if slice is not a valid DNS packet.
+/*
+ * parses raw UDP or TCP application payload into a `DnsInfo` structure.
+ *
+ * arguments:
+ * * `slice` - byte slice containing the DNS packet.
+ *
+ * returns:
+ * `Some(DnsInfo)` if parsed successfully, or `None` if slice is not a valid DNS packet.
+ */
 pub fn parse_dns(slice: &[u8]) -> Option<DnsInfo> {
-    // DNS header is 12 bytes fixed
+    /* DNS header is 12 bytes fixed */
     if slice.len() < 12 {
         return None;
     }
@@ -223,7 +244,7 @@ pub fn parse_dns(slice: &[u8]) -> Option<DnsInfo> {
     let mut offset = 12;
     let mut questions = Vec::new();
 
-    // Parse question section (capped at 20 questions for safety)
+    /* parse question section (capped at 20 questions for safety) */
     for _ in 0..qd_count.min(20) {
         let (name, next_offset) = parse_domain_name(slice, offset)?;
         if next_offset + 4 > slice.len() {
@@ -241,7 +262,7 @@ pub fn parse_dns(slice: &[u8]) -> Option<DnsInfo> {
     }
 
     let mut answers = Vec::new();
-    // Parse answer section (capped at 20 answers for safety)
+    /* parse answer section (capped at 20 answers for safety) */
     for _ in 0..an_count.min(20) {
         let (name, next_offset) = parse_domain_name(slice, offset)?;
         if next_offset + 10 > slice.len() {
@@ -262,10 +283,10 @@ pub fn parse_dns(slice: &[u8]) -> Option<DnsInfo> {
             break;
         }
 
-        // Format RDATA based on record type
+        /* format RDATA based on record type */
         let data = match atype {
             1 if rdlength == 4 => {
-                // A Record: 4-byte IPv4 address
+                /* A Record: 4-byte IPv4 address */
                 let ip = Ipv4Addr::new(
                     slice[rdata_start],
                     slice[rdata_start + 1],
@@ -275,14 +296,14 @@ pub fn parse_dns(slice: &[u8]) -> Option<DnsInfo> {
                 ip.to_string()
             }
             28 if rdlength == 16 => {
-                // AAAA Record: 16-byte IPv6 address
+                /* AAAA Record: 16-byte IPv6 address */
                 let mut ip_bytes = [0u8; 16];
                 ip_bytes.copy_from_slice(&slice[rdata_start..rdata_end]);
                 let ip = Ipv6Addr::from(ip_bytes);
                 ip.to_string()
             }
             5 | 12 | 2 => {
-                // CNAME, PTR, or NS record (domain name)
+                /* CNAME, PTR, or NS record (domain name) */
                 if let Some((target, _)) = parse_domain_name(slice, rdata_start) {
                     target
                 } else {
@@ -290,7 +311,7 @@ pub fn parse_dns(slice: &[u8]) -> Option<DnsInfo> {
                 }
             }
             16 => {
-                // TXT record
+                /* TXT record */
                 if rdlength > 1 {
                     String::from_utf8_lossy(&slice[rdata_start + 1..rdata_end]).to_string()
                 } else {

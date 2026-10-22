@@ -1,59 +1,78 @@
-//! Internet Control Message Protocol (ICMPv4 and ICMPv6) parser.
-//!
-//! Defined in RFC 792 (ICMPv4) and RFC 4443 (ICMPv6), ICMP is used for network diagnostics,
-//! error reporting (e.g. Destination Unreachable, TTL Exceeded), and ping (Echo Request/Reply).
+/*
+ * Internet Control Message Protocol (ICMPv4 and ICMPv6) parser.
+ *
+ * flow of control in ICMP decoding:
+ * 1. entry point: called from `protocols::PacketParser::parse()` when:
+ *    - IPv4 protocol number is 1 (`parse_icmpv4`)
+ *    - IPv6 next header protocol is 58 (`parse_icmpv6`)
+ * 2. length check: validates 4-byte minimum header length (type, code, checksum).
+ * 3. type and code demuxing: identifies message class (Echo, Destination Unreachable, Time Exceeded, etc.).
+ * 4. ping tracking: for Echo Request/Reply messages, parses 16-bit identifier and 16-bit sequence number.
+ * 5. code lookup: maps numeric codes to descriptive error reasons (e.g. Host Unreachable, Port Unreachable).
+ * 6. hand-off: returns structured ICMP details for display and summary generation.
+ */
 
-/// Decoded ICMP packet: either ICMP for IPv4 or ICMP for IPv6.
+/*
+ * decoded ICMP packet: either ICMP for IPv4 or ICMP for IPv6.
+ */
 #[derive(Debug, Clone)]
 pub enum IcmpInfo {
-    /// ICMP version 4 packet.
+    /* ICMP version 4 packet. */
     V4(Icmpv4Info),
-    /// ICMP version 6 packet.
+    /* ICMP version 6 packet. */
     V6(Icmpv6Info),
 }
 
-/// Decoded ICMPv4 header fields.
+/*
+ * decoded ICMPv4 header fields.
+ * corresponds to RFC 792 specifications.
+ */
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Icmpv4Info {
-    /// ICMP type number (e.g. 0 for Echo Reply, 8 for Echo Request).
+    /* ICMP type number (e.g. 0 for Echo Reply, 8 for Echo Request). */
     pub icmp_type: u8,
-    /// Sub-type code providing additional error context.
+    /* sub-type code providing additional error context. */
     pub code: u8,
-    /// Header checksum.
+    /* header checksum. */
     pub checksum: u16,
-    /// Optional identifier for Echo requests/replies.
+    /* optional identifier for Echo requests/replies. */
     pub id: Option<u16>,
-    /// Optional sequence number for Echo requests/replies.
+    /* optional sequence number for Echo requests/replies. */
     pub seq: Option<u16>,
-    /// Human-readable type name.
+    /* human-readable type name. */
     pub type_name: &'static str,
-    /// Detailed description of the specific code if available.
+    /* detailed description of the specific code if available. */
     pub code_name: Option<&'static str>,
 }
 
-/// Decoded ICMPv6 header fields.
+/*
+ * decoded ICMPv6 header fields.
+ * corresponds to RFC 4443 specifications.
+ */
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Icmpv6Info {
-    /// ICMPv6 type number (e.g. 128 for Echo Request, 135 for Neighbor Solicitation).
+    /* ICMPv6 type number (e.g. 128 for Echo Request, 135 for Neighbor Solicitation). */
     pub icmp_type: u8,
-    /// Sub-type code.
+    /* sub-type code. */
     pub code: u8,
-    /// Header checksum.
+    /* header checksum. */
     pub checksum: u16,
-    /// Optional identifier for Echo requests/replies.
+    /* optional identifier for Echo requests/replies. */
     pub id: Option<u16>,
-    /// Optional sequence number for Echo requests/replies.
+    /* optional sequence number for Echo requests/replies. */
     pub seq: Option<u16>,
-    /// Human-readable type name.
+    /* human-readable type name. */
     pub type_name: &'static str,
-    /// Detailed description of the code if available.
+    /* detailed description of the code if available. */
     pub code_name: Option<&'static str>,
 }
 
 impl IcmpInfo {
-    /// Returns a human-readable summary of the ICMP message.
+    /*
+     * returns a human-readable summary of the ICMP message.
+     */
     pub fn summary(&self) -> String {
         match self {
             IcmpInfo::V4(v4) => {
@@ -78,11 +97,14 @@ impl IcmpInfo {
     }
 }
 
-/// Parses an ICMPv4 header from raw bytes.
-///
-/// # Arguments
-/// * `slice` - Byte slice containing the ICMPv4 packet.
+/*
+ * parses an ICMPv4 header from raw bytes.
+ *
+ * arguments:
+ * * `slice` - byte slice containing the ICMPv4 packet.
+ */
 pub fn parse_icmpv4(slice: &[u8]) -> Option<Icmpv4Info> {
+    /* minimum ICMPv4 header length is 4 bytes */
     if slice.len() < 4 {
         return None;
     }
@@ -94,7 +116,7 @@ pub fn parse_icmpv4(slice: &[u8]) -> Option<Icmpv4Info> {
     let mut id = None;
     let mut seq = None;
 
-    // For Echo Request (8) and Echo Reply (0), bytes 4..8 contain identifier and sequence
+    /* for Echo Request (8) and Echo Reply (0), bytes 4..8 contain identifier and sequence */
     if (icmp_type == 0 || icmp_type == 8 || icmp_type == 13 || icmp_type == 14) && slice.len() >= 8 {
         id = Some(u16::from_be_bytes([slice[4], slice[5]]));
         seq = Some(u16::from_be_bytes([slice[6], slice[7]]));
@@ -144,11 +166,14 @@ pub fn parse_icmpv4(slice: &[u8]) -> Option<Icmpv4Info> {
     })
 }
 
-/// Parses an ICMPv6 header from raw bytes.
-///
-/// # Arguments
-/// * `slice` - Byte slice containing the ICMPv6 packet.
+/*
+ * parses an ICMPv6 header from raw bytes.
+ *
+ * arguments:
+ * * `slice` - byte slice containing the ICMPv6 packet.
+ */
 pub fn parse_icmpv6(slice: &[u8]) -> Option<Icmpv6Info> {
+    /* minimum ICMPv6 header length is 4 bytes */
     if slice.len() < 4 {
         return None;
     }
@@ -160,6 +185,7 @@ pub fn parse_icmpv6(slice: &[u8]) -> Option<Icmpv6Info> {
     let mut id = None;
     let mut seq = None;
 
+    /* echo Request (128) and Echo Reply (129) carry identifier and sequence */
     if (icmp_type == 128 || icmp_type == 129) && slice.len() >= 8 {
         id = Some(u16::from_be_bytes([slice[4], slice[5]]));
         seq = Some(u16::from_be_bytes([slice[6], slice[7]]));

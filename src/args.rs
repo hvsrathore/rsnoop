@@ -1,59 +1,89 @@
-//! Command-line argument definitions and configuration.
-//!
-//! Utilizes `clap` to provide command-line options for:
-//! - Selecting live capture network interface (`-i, --interface`).
-//! - Discovering and listing host network interfaces (`-l, --list-interfaces`).
-//! - Applying Berkeley Packet Filter (BPF) syntax (`-f, --filter`).
-//! - Filtering by protocol (`-p, --protocol`) and port (`--port`).
-//! - Directional filtering (`-d, --direction in|out|all`).
-//! - Controlling stdout output detail (`-v, --verbose` and `-x, --hexdump`).
-//! - Limiting packet count (`-c, --count`).
+/*
+ * command-line argument definitions and configuration.
+ *
+ * utilizes `clap` to provide command-line options for:
+ * - selecting live capture network interface (`-i, --interface`).
+ * - discovering and listing host network interfaces (`-l, --list-interfaces`).
+ * - applying Berkeley Packet Filter (BPF) syntax (`-f, --filter`).
+ * - filtering by protocol (`-p, --protocol`) and port (`--port`).
+ * - directional filtering (`-d, --direction in|out|all`).
+ * - controlling stdout output detail (`-v, --verbose` and `-x, --hexdump`).
+ * - limiting packet count (`-c, --count`).
+ * - controlling promiscuous mode (`--no-promisc`).
+ */
 
 use clap::{Parser, ValueEnum};
 
-/// Filter options for packet direction.
+/*
+ * filter options for packet direction.
+ * allows filtering traffic based on whether packets are incoming (received by local host),
+ * outgoing (transmitted by local host), or both.
+ */
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum DirectionFilter {
-    /// Show all packets (both incoming and outgoing).
+    /* show all packets (both incoming and outgoing). */
+    #[value(help = "Show all packets (both incoming and outgoing)")]
     All,
-    /// Show only incoming (received) packets.
+    /* show only incoming (received) packets. */
+    #[value(help = "Show only incoming (received) packets")]
     In,
-    /// Show only outgoing (sent) packets.
+    /* show only outgoing (sent) packets. */
+    #[value(help = "Show only outgoing (sent) packets")]
     Out,
 }
 
-/// Filter options for network protocols.
+/*
+ * filter options for network protocols.
+ * allows users to restrict packet capture display to specific network or transport layer protocols.
+ */
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ProtocolFilter {
-    /// Show all supported network protocols.
+    /* show all supported network protocols. */
+    #[value(help = "Show all supported network protocols")]
     All,
-    /// Filter for Transmission Control Protocol (TCP).
+    /* filter for Transmission Control Protocol (TCP). */
+    #[value(help = "Filter for Transmission Control Protocol (TCP)")]
     Tcp,
-    /// Filter for User Datagram Protocol (UDP).
+    /* filter for User Datagram Protocol (UDP). */
+    #[value(help = "Filter for User Datagram Protocol (UDP)")]
     Udp,
-    /// Filter for Internet Control Message Protocol (ICMPv4 & ICMPv6).
+    /* filter for Internet Control Message Protocol (ICMPv4 & ICMPv6). */
+    #[value(help = "Filter for Internet Control Message Protocol (ICMPv4 & ICMPv6)")]
     Icmp,
-    /// Filter for Address Resolution Protocol (ARP).
+    /* filter for Address Resolution Protocol (ARP). */
+    #[value(help = "Filter for Address Resolution Protocol (ARP)")]
     Arp,
-    /// Filter for Domain Name System (DNS).
+    /* filter for Domain Name System (DNS). */
+    #[value(help = "Filter for Domain Name System (DNS)")]
     Dns,
-    /// Filter for Hypertext Transfer Protocol (HTTP).
+    /* filter for Hypertext Transfer Protocol (HTTP). */
+    #[value(help = "Filter for Hypertext Transfer Protocol (HTTP)")]
     Http,
-    /// Filter for Transport Layer Security (TLS/HTTPS).
+    /* filter for Transport Layer Security (TLS/HTTPS). */
+    #[value(help = "Filter for Transport Layer Security (TLS/HTTPS)")]
     Tls,
-    /// Filter for Dynamic Host Configuration Protocol (DHCP).
+    /* filter for Dynamic Host Configuration Protocol (DHCP). */
+    #[value(help = "Filter for Dynamic Host Configuration Protocol (DHCP)")]
     Dhcp,
-    /// Filter for Network Time Protocol (NTP).
+    /* filter for Network Time Protocol (NTP). */
+    #[value(help = "Filter for Network Time Protocol (NTP)")]
     Ntp,
-    /// Filter for Secure Shell (SSH).
+    /* filter for Secure Shell (SSH). */
+    #[value(help = "Filter for Secure Shell (SSH)")]
     Ssh,
-    /// Filter for Internet Protocol version 4 (IPv4).
+    /* filter for Internet Protocol version 4 (IPv4). */
+    #[value(help = "Filter for Internet Protocol version 4 (IPv4)")]
     Ipv4,
-    /// Filter for Internet Protocol version 6 (IPv6).
+    /* filter for Internet Protocol version 6 (IPv6). */
+    #[value(help = "Filter for Internet Protocol version 6 (IPv6)")]
     Ipv6,
 }
 
-/// Command-line arguments for the packet sniffer.
+/*
+ * command-line arguments for the packet sniffer.
+ * parsed by clap from environment arguments to configure capture behaviour,
+ * filtering criteria, interface selection, and output formatting.
+ */
 #[derive(Parser, Debug)]
 #[command(
     name = "rsnoop",
@@ -62,44 +92,88 @@ pub enum ProtocolFilter {
     about = "High-performance network packet sniffer in Rust with real-time stdout multi-protocol decoding and directional tracking (TX/RX)."
 )]
 pub struct CliArgs {
-    /// Network interface to capture packets from (e.g. eth0, wlp7s0, lo, any).
-    /// If not specified, the sniffer automatically selects the best active non-loopback device.
-    #[arg(short = 'i', long = "interface")]
+    /*
+     * network interface to capture packets from (e.g. eth0, wlp7s0, lo, any).
+     * if not specified, the sniffer automatically selects the best active non-loopback device.
+     */
+    #[arg(
+        short = 'i',
+        long = "interface",
+        help = "Network interface to capture packets from (e.g. eth0, wlp7s0, lo, any). If not specified, the sniffer automatically selects the best active non-loopback device"
+    )]
     pub interface: Option<String>,
 
-    /// List all available network interfaces on the host system and exit.
-    #[arg(short = 'l', long = "list-interfaces")]
+    /* list all available network interfaces on the host system and exit. */
+    #[arg(
+        short = 'l',
+        long = "list-interfaces",
+        help = "List all available network interfaces on the host system and exit"
+    )]
     pub list_interfaces: bool,
 
-    /// Berkeley Packet Filter (BPF) syntax expression (e.g. "tcp and port 443", "icmp", "udp").
-    #[arg(short = 'f', long = "filter")]
+    /* berkeley packet filter (BPF) syntax expression (e.g. "tcp and port 443", "icmp", "udp"). */
+    #[arg(
+        short = 'f',
+        long = "filter",
+        help = "Berkeley Packet Filter (BPF) syntax expression (e.g. \"tcp and port 443\", \"icmp\", \"udp\")"
+    )]
     pub filter: Option<String>,
 
-    /// Filter packets by protocol name.
-    #[arg(short = 'p', long = "protocol", value_enum, default_value_t = ProtocolFilter::All)]
+    /* filter packets by protocol name. */
+    #[arg(
+        short = 'p',
+        long = "protocol",
+        value_enum,
+        default_value_t = ProtocolFilter::All,
+        help = "Filter packets by protocol name"
+    )]
     pub protocol: ProtocolFilter,
 
-    /// Filter packets by port number (matches either source or destination port).
-    #[arg(long = "port")]
+    /* filter packets by port number (matches either source or destination port). */
+    #[arg(
+        long = "port",
+        help = "Filter packets by port number (matches either source or destination port)"
+    )]
     pub port: Option<u16>,
 
-    /// Filter packets by direction: in (received), out (sent), or all.
-    #[arg(short = 'd', long = "direction", value_enum, default_value_t = DirectionFilter::All)]
+    /* filter packets by direction: in (received), out (sent), or all. */
+    #[arg(
+        short = 'd',
+        long = "direction",
+        value_enum,
+        default_value_t = DirectionFilter::All,
+        help = "Filter packets by direction: in (received), out (sent), or all"
+    )]
     pub direction: DirectionFilter,
 
-    /// Verbose output with detailed hierarchical protocol header breakdown displayed on stdout.
-    #[arg(short = 'v', long = "verbose")]
+    /* verbose output with detailed hierarchical protocol header breakdown displayed on stdout. */
+    #[arg(
+        short = 'v',
+        long = "verbose",
+        help = "Verbose output with detailed hierarchical protocol header breakdown displayed on stdout"
+    )]
     pub verbose: bool,
 
-    /// Show side-by-side hexadecimal and printable ASCII dump of packet payload on stdout.
-    #[arg(short = 'x', long = "hexdump")]
+    /* show side-by-side hexadecimal and printable ASCII dump of packet payload on stdout. */
+    #[arg(
+        short = 'x',
+        long = "hexdump",
+        help = "Show side-by-side hexadecimal and printable ASCII dump of packet payload on stdout"
+    )]
     pub hexdump: bool,
 
-    /// Stop capture after displaying the specified number of packets.
-    #[arg(short = 'c', long = "count")]
+    /* stop capture after displaying the specified number of packets. */
+    #[arg(
+        short = 'c',
+        long = "count",
+        help = "Stop capture after displaying the specified number of packets"
+    )]
     pub count: Option<usize>,
 
-    /// Disable promiscuous mode on the capturing interface.
-    #[arg(long = "no-promisc")]
+    /* disable promiscuous mode on the capturing interface. */
+    #[arg(
+        long = "no-promisc",
+        help = "Disable promiscuous mode on the capturing interface"
+    )]
     pub no_promisc: bool,
 }

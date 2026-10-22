@@ -1,18 +1,32 @@
+/*
+ * terminal output renderer for network packets.
+ *
+ * flow of control in packet rendering:
+ * 1. entry point: called from `main::run_live_capture()` for every packet that satisfies user filters.
+ * 2. mode dispatch: `PacketPrinter::print()` branches depending on CLI flags:
+ *    - if `args.verbose` -> calls `print_verbose()` to display multi-layer hierarchical breakdown.
+ *    - otherwise -> calls `print_compact()` to display single-line colorized summary.
+ * 3. hexdump branch: if `args.hexdump` is true and payload bytes remain, invokes `print_hexdump()`
+ *    to format side-by-side hex and ASCII columns.
+ * 4. visual styling: utilizes ANSI escape codes via `colored` crate for clear protocol identification.
+ */
+
 use crate::direction::PacketDirection;
 use crate::protocols::ethernet::format_mac;
 use crate::protocols::{AppProtocol, L2Info, ParsedPacket};
 use colored::Colorize;
 
-/// Terminal output renderer for network packets.
-///
-/// Supports three display modes:
-/// 1. Compact mode: A single high-density colored line per packet (similar to tcpdump/tshark).
-/// 2. Verbose mode: A structured, multi-layer hierarchical breakdown (similar to Wireshark packet details).
-/// 3. Hexdump mode: Side-by-side hexadecimal and ASCII view of packet payload.
+/*
+ * terminal output renderer for network packets.
+ * supports compact single-line streaming, verbose layer inspection, and raw payload hexdumps.
+ */
 pub struct PacketPrinter;
 
 impl PacketPrinter {
-    /// Formats and displays a packet according to verbose and hexdump settings.
+    /*
+     * formats and displays a packet according to verbose and hexdump settings.
+     * orchestrates the terminal rendering pipeline for each captured packet.
+     */
     pub fn print(packet: &ParsedPacket, verbose: bool, hexdump: bool) {
         if verbose {
             Self::print_verbose(packet);
@@ -20,20 +34,23 @@ impl PacketPrinter {
             Self::print_compact(packet);
         }
 
+        /* optionally display raw packet payload bytes in side-by-side hex and ASCII */
         if hexdump && !packet.payload.is_empty() {
             Self::print_hexdump(&packet.payload);
         }
     }
 
-    /// Renders a single-line summary of the packet with colors:
-    /// [Index] [Timestamp] [Direction] [Protocol] [Endpoints] [Protocol Details / Summary]
+    /*
+     * renders a single-line summary of the packet with colors:
+     * [Index] [Timestamp] [Direction] [Protocol] [Endpoints] [Protocol Details / Summary]
+     */
     pub fn print_compact(packet: &ParsedPacket) {
         let time_str = packet.timestamp.format("%H:%M:%S%.6f").to_string();
         let num_str = format!("#{:05}", packet.packet_num).dimmed();
         let dir_badge = packet.direction.badge();
         let proto_badge = Self::protocol_badge(packet.display_protocol());
 
-        // Extract endpoints (Source -> Destination)
+        /* extract endpoint representation (Source -> Destination) */
         let endpoints = if let Some(ip) = &packet.ip {
             let src = ip.src_ip();
             let dst = ip.dst_ip();
@@ -85,7 +102,7 @@ impl PacketPrinter {
             "Unknown Endpoints".to_string()
         };
 
-        // Extract protocol specific info / summary
+        /* extract protocol-specific summary information */
         let details = if let Some(app) = &packet.app {
             match app {
                 AppProtocol::Dns(dns) => dns.summary().green(),
@@ -117,6 +134,7 @@ impl PacketPrinter {
             format!("Raw packet ({} bytes)", packet.raw_len).dimmed()
         };
 
+        /* output compact aligned row to stdout */
         println!(
             "{} {} {} {} {:<45} {}",
             num_str,
@@ -128,7 +146,10 @@ impl PacketPrinter {
         );
     }
 
-    /// Renders a multi-line tree breakdown of every network layer in the packet.
+    /*
+     * renders a multi-line tree breakdown of every network layer in the packet.
+     * produces a Wireshark-like hierarchical structural view of parsed fields.
+     */
     pub fn print_verbose(packet: &ParsedPacket) {
         println!();
         println!(
@@ -150,7 +171,7 @@ impl PacketPrinter {
             .white()
         );
 
-        // Layer 2: Data Link Layer
+        /* layer 2: Data Link Layer inspection */
         if let Some(l2) = &packet.l2 {
             match l2 {
                 L2Info::Ethernet(eth) => {
@@ -185,7 +206,7 @@ impl PacketPrinter {
             }
         }
 
-        // Layer 3: ARP or IP
+        /* layer 3: ARP or IP inspection */
         if let Some(arp) = &packet.arp {
             println!(
                 "│ {} Address Resolution Protocol (ARP):",
@@ -231,7 +252,7 @@ impl PacketPrinter {
             }
         }
 
-        // Layer 4: TCP, UDP, or ICMP
+        /* layer 4: TCP, UDP, or ICMP inspection */
         if let Some(tcp) = &packet.tcp {
             let src_name = tcp.src_port_name.map(|n| format!(" ({})", n)).unwrap_or_default();
             let dst_name = tcp.dst_port_name.map(|n| format!(" ({})", n)).unwrap_or_default();
@@ -273,7 +294,7 @@ impl PacketPrinter {
             );
         }
 
-        // Layer 5/7: Application Protocols
+        /* layer 5/7: Application Protocols inspection */
         if let Some(app) = &packet.app {
             match app {
                 AppProtocol::Dns(dns) => {
@@ -358,6 +379,7 @@ impl PacketPrinter {
             }
         }
 
+        /* display count of unparsed payload bytes remaining */
         if !packet.payload.is_empty() {
             println!(
                 "│ {} Payload Data: {} unparsed bytes",
@@ -369,7 +391,10 @@ impl PacketPrinter {
         }
     }
 
-    /// Outputs a formatted hexadecimal and printable ASCII dump of raw bytes (hexdump -C style).
+    /*
+     * outputs a formatted hexadecimal and printable ASCII dump of raw bytes (hexdump -C style).
+     * formats data into 16-byte aligned rows with octet index spacing and ASCII view.
+     */
     pub fn print_hexdump(data: &[u8]) {
         println!("{}", "--- Hex Dump ---".dimmed());
         for chunk in data.chunks(16) {
@@ -382,6 +407,7 @@ impl PacketPrinter {
                 }
                 hex_part.push_str(&format!("{:02x} ", byte));
 
+                /* print ASCII graphic characters or space, replace non-printables with dot */
                 if byte.is_ascii_graphic() || *byte == b' ' {
                     ascii_part.push(*byte as char);
                 } else {
@@ -389,7 +415,7 @@ impl PacketPrinter {
                 }
             }
 
-            // Pad remaining space if last chunk is shorter than 16 bytes
+            /* pad remaining space if last chunk is shorter than 16 bytes */
             let pad_len = 16 - chunk.len();
             let mut pad_spaces = pad_len * 3;
             if chunk.len() <= 8 {
@@ -404,7 +430,9 @@ impl PacketPrinter {
         println!();
     }
 
-    /// Color-coded badge for protocol names.
+    /*
+     * color-coded badge for protocol names.
+     */
     fn protocol_badge(proto: &str) -> colored::ColoredString {
         match proto {
             "DNS" => "[DNS ]".bold().green(),
