@@ -1,4 +1,4 @@
-# Packet Sniffer in Rust (`packet_sniffer_v2`)
+# rsnoop - Packet Sniffer in Rust
 
 A high-performance, real-time network packet sniffer written in pure Rust. Captures live network traffic from system interfaces, decodes all major network protocols across Layers 2 through 7, accurately identifies whether each packet was **Sent (TX)** or **Received (RX)**, and formats the output directly to `stdout`.
 
@@ -53,7 +53,7 @@ Build the release binary:
 cargo build --release
 ```
 
-The compiled binary will be placed at `./target/release/packet_sniffer_v2`.
+The compiled binary will be placed at `./target/release/rsnoop`.
 
 ---
 
@@ -63,15 +63,15 @@ Capturing raw packets directly from a network interface requires elevated networ
 
 ### Option A: Run with `sudo`
 ```bash
-sudo ./target/release/packet_sniffer_v2 -i <interface>
+sudo ./target/release/rsnoop -i <interface>
 ```
 
 ### Option B: Grant Linux Capabilities (Run without `sudo`)
 To run the sniffer as a normal unprivileged user, grant the binary `cap_net_raw` and `cap_net_admin`:
 
 ```bash
-sudo setcap cap_net_raw,cap_net_admin=eip ./target/release/packet_sniffer_v2
-./target/release/packet_sniffer_v2 -i <interface>
+sudo setcap cap_net_raw,cap_net_admin=eip ./target/release/rsnoop
+./target/release/rsnoop -i <interface>
 ```
 
 ---
@@ -79,7 +79,7 @@ sudo setcap cap_net_raw,cap_net_admin=eip ./target/release/packet_sniffer_v2
 ## Usage & CLI Options
 
 ```
-Usage: packet_sniffer_v2 [OPTIONS]
+Usage: rsnoop [OPTIONS]
 
 Options:
   -i, --interface <INTERFACE>    Network interface to capture on (e.g. eth0, wlp7s0, lo, any)
@@ -102,37 +102,37 @@ Options:
 
 ### 1. Discover Available Network Interfaces
 ```bash
-./target/release/packet_sniffer_v2 --list-interfaces
+./target/release/rsnoop --list-interfaces
 ```
 
 ### 2. Live Capture with Real-Time stdout Streaming
 ```bash
-sudo ./target/release/packet_sniffer_v2 -i wlp7s0
+sudo ./target/release/rsnoop -i wlp7s0
 ```
 
 ### 3. Filter by Protocol (e.g., DNS Queries and Answers)
 ```bash
-sudo ./target/release/packet_sniffer_v2 -i wlp7s0 -p dns
+sudo ./target/release/rsnoop -i wlp7s0 -p dns
 ```
 
 ### 4. Filter by Direction (e.g., Show Only Outgoing/Sent Packets)
 ```bash
-sudo ./target/release/packet_sniffer_v2 -i wlp7s0 -d out
+sudo ./target/release/rsnoop -i wlp7s0 -d out
 ```
 
 ### 5. Inspect TLS Traffic with Server Name Indication (SNI) Extraction
 ```bash
-sudo ./target/release/packet_sniffer_v2 -i wlp7s0 -p tls
+sudo ./target/release/rsnoop -i wlp7s0 -p tls
 ```
 
 ### 6. Filter Using BPF Syntax
 ```bash
-sudo ./target/release/packet_sniffer_v2 -i wlp7s0 -f "tcp and port 443"
+sudo ./target/release/rsnoop -i wlp7s0 -f "tcp and port 443"
 ```
 
 ### 7. Verbose Wireshark-Style Inspection with Hexdump
 ```bash
-sudo ./target/release/packet_sniffer_v2 -i wlp7s0 -v -x -c 5
+sudo ./target/release/rsnoop -i wlp7s0 -v -x -c 5
 ```
 
 ---
@@ -140,7 +140,7 @@ sudo ./target/release/packet_sniffer_v2 -i wlp7s0 -v -x -c 5
 ## Project Structure
 
 ```
-packet_sniffer_v2/
+rsnoop/
 ├── Cargo.toml                  # Project manifest and dependencies
 ├── README.md                   # Project documentation
 └── src/

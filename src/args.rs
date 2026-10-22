@@ -56,8 +56,8 @@ pub enum ProtocolFilter {
 /// Command-line arguments for the packet sniffer.
 #[derive(Parser, Debug)]
 #[command(
-    name = "packet_sniffer",
-    author = "Rust Packet Sniffer",
+    name = "rsnoop",
+    author = "rsnoop",
     version = "1.0.0",
     about = "High-performance network packet sniffer in Rust with real-time stdout multi-protocol decoding and directional tracking (TX/RX)."
 )]

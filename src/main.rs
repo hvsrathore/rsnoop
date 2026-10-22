@@ -225,8 +225,8 @@ fn explain_permission_error(err: &pcap::Error, iface: &str) -> String {
             "Permission denied while capturing on '{}'.\n\
             Live packet capture requires elevated privileges (root or CAP_NET_RAW) on Linux.\n\
             To run live capture, please use:\n\
-              1) sudo:                sudo ./target/release/packet_sniffer_v2 -i {}\n\
-              2) Or grant capability: sudo setcap cap_net_raw,cap_net_admin=eip ./target/release/packet_sniffer_v2",
+              1) sudo:                sudo ./target/release/rsnoop -i {}\n\
+              2) Or grant capability: sudo setcap cap_net_raw,cap_net_admin=eip ./target/release/rsnoop",
             iface, iface
         )
     } else {
