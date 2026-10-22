@@ -1,0 +1,15 @@
+[package]
+name = "rsnoop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+colored = "3.1.1"
+ctrlc = "3.5.2"
+etherparse = "0.21.0"
+httparse = "1.10.1"
+libc = "0.2.191"
+pcap = "2.5.0"
+tls-parser = "0.12.2"
