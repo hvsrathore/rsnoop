@@ -2,6 +2,13 @@
 name = "rsnoop"
 version = "0.1.0"
 edition = "2024"
+authors = ["Harsh Vardhan <4444hv@gmail.com>"]
+description = "High-performance network packet sniffer in Rust with real-time stdout multi-protocol decoding and directional tracking (TX/RX)"
+license = "MIT"
+repository = "https://github.com/hvsrathore/rsnoop"
+readme = "README.md"
+keywords = ["packet-sniffer", "network", "pcap", "wireshark", "bpf"]
+categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 chrono = "0.4.45"
